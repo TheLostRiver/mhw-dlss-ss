@@ -1,6 +1,6 @@
 """Summarize an archived bridge preflight log without accessing the game."""
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 import hashlib
 import json
 from pathlib import Path
@@ -22,12 +22,25 @@ groups=Counter((r.get('phase'),tuple(r.get('source_rect',[])),tuple(r.get('textu
 complete=events('sequence_complete')
 stopped=events('stopped')
 input_only=events('input_capture_complete')
-restored=bool(stopped and stopped[-1].get('owned_hooks_restored') and not stopped[-1].get('scale_override_pending') and
+restored=bool(stopped and stopped[-1].get('owned_hooks_restored') and not stopped[-1].get('scale_override_pending') and not stopped[-1].get('jitter_override_pending',False) and
     ((complete and abs(complete[-1].get('active',0)-1)<1e-5) or input_only))
 inputs=events('taa_screen_input')
 valid_inputs=[r for r in inputs if r.get('error')==0]
 input_groups=Counter((tuple(r.get('output',[])),tuple(r.get('active_input',[])),r.get('actual_scale')) for r in valid_inputs)
 errors=Counter(r.get('error') for r in inputs if r.get('error'))
+camera=[r for r in valid_inputs if r.get('camera_valid') and 'projection_jitter' in r and 'previous_projection_jitter' in r]
+camera_groups=defaultdict(list)
+for row in camera:camera_groups[tuple(row.get('active_input',[]))].append(row)
+jitter_groups=[]
+for size,group in sorted(camera_groups.items()):
+    nonzero=[r for r in group if any(abs(v)>1e-12 for v in r['projection_jitter'])]
+    jitter_groups.append({'active_input':list(size),'records':len(group),'nonzero_current_records':len(nonzero),
+        'nonzero_previous_records':sum(any(abs(v)>1e-12 for v in r['previous_projection_jitter']) for r in group),
+        'distinct_projection_jitter':sorted({tuple(r['projection_jitter']) for r in group}),
+        'distinct_candidate_view_pixel_jitter':sorted({tuple(r['candidate_view_pixel_jitter']) for r in group if 'candidate_view_pixel_jitter' in r})})
+adjacent=[(a,b) for a,b in zip(camera,camera[1:]) if b['taa_serial']==a['taa_serial']+1 and a.get('list')==b.get('list')]
+previous_matches=sum(max(abs(a['projection_jitter'][i]-b['previous_projection_jitter'][i]) for i in (0,1))<1e-8 for a,b in adjacent)
+triangles=events('post_taa_triangle')
 summary={
     'source':str(args.capture),'sha256':hashlib.sha256(data).hexdigest(),
     'versions':sorted({r['version'] for r in rows if 'version' in r}),
@@ -46,9 +59,19 @@ summary={
     'taa_input_dimensions':[{'output':list(output),'active_input':list(active),'actual_scale':scale,'records':n}
         for (output,active,scale),n in sorted(input_groups.items())],
     'camera_records':sum(bool(r.get('camera_valid')) for r in inputs),
+    'camera_jitter_groups':jitter_groups,
+    'camera_adjacent_pairs':len(adjacent),'previous_jitter_matches_prior_current':previous_matches,
+    'all_observed_projection_jitter_zero':bool(camera) and not any(any(abs(v)>1e-12 for v in r['projection_jitter']+r['previous_projection_jitter']) for r in camera),
+    'projection_jitter_events':[r for r in rows if r.get('event') in {'projection_jitter_enabled','projection_jitter_restored','jitter_pulse_refused'}],
+    'vertex_buffers':events('vertex_buffer_observed'),
+    'post_taa_triangle_kinds':triangles,
+    'mapped_post_taa_triangle_kinds':sum(bool(r.get('vertex_data_mapped')) for r in triangles),
+    'matching_low_roi_triangle_kinds':sum(bool(r.get('matches_low_roi_sampling')) for r in triangles),
     'input_only_completion':input_only,
     'limits':['Same CPU invocation and rectangle do not prove GPU resource identity or temporal correctness.',
-              'No NGX feature creation/evaluation or copy-rectangle modification occurs in this preflight build.'],
+              'No NGX feature creation/evaluation or copy-rectangle modification occurs in this preflight build.',
+              'Camera validity means readable finite values in bounds, not nonzero jitter or temporal correctness.',
+              'Triangle observations are deduplicated CPU snapshots; matching UVs do not establish source texture identity or GPU completion.'],
 }
 args.output.parent.mkdir(parents=True,exist_ok=True)
 args.output.write_text(json.dumps(summary,ensure_ascii=False,indent=2),'utf-8')

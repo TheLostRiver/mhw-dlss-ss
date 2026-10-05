@@ -37,14 +37,21 @@ std::mutex g_logMutex, g_viewsMutex;
 std::ofstream g_log;
 std::map<std::tuple<unsigned, unsigned, unsigned>, uint64_t> g_views;
 struct Hook { void* address{}; std::array<unsigned char,16> patch{},original{}; bool enabled=false; };
-std::array<Hook,10> g_hooks{};
+std::array<Hook,16> g_hooks{};
 std::string g_expectedProxyHash;
 bool g_requireFrameGenOff=true;
 bool g_applyScalePulse=true;
 bool g_gameHooks=true;
+bool g_tracePostTaa=false;
+bool g_pulseJitter=false;
+std::atomic<bool> g_jitterChanged{false};
+bool EnableJitterPulse();
+bool JitterPulseStillOwned();
+void RestoreJitterPulse() noexcept;
 std::atomic<uint64_t> g_engineUpdates{0};
 void PrepareBridgeHooks();
 void PrepareSceneScopeHook();
+void PrepareEngineVertexHook();
 void RecordBridgeViewport(ID3D12GraphicsCommandList*,UINT,const D3D12_VIEWPORT*);
 void FinishBridge();
 uint64_t g_phaseStart=0;
@@ -72,6 +79,7 @@ void Snapshot(const char* event,void* object) {
     Log(out.str());
 }
 void Restore(void* object,const char* reason) {
+    RestoreJitterPulse();
     // Preserve a newer value written by a user setting change instead of overwriting it.
     const auto pending=Value(object,0x1f0);
     g_restoreExpected=Near(pending,g_expected)?g_original:pending;
@@ -97,7 +105,7 @@ void __fastcall OnUpdate(void* object) {
         if(Uint(object,0x198)!=g_width||Uint(object,0x19c)!=g_height) g_abort.store(true);
         if(g_abort.load()&&phase<3) {
             if(g_changed.load()) Restore(object,"abort");
-            else {Log("{\"event\":\"aborted_before_change\"}");g_done.store(true);}
+            else {RestoreJitterPulse();Log("{\"event\":\"aborted_before_change\"}");g_done.store(true);}
             return;
         }
         if(phase==1&&now-g_phaseStart>=1500) {
@@ -105,12 +113,14 @@ void __fastcall OnUpdate(void* object) {
                 Log("{\"event\":\"baseline_changed_no_override\"}");g_done.store(true);return;
             }
             if(!g_applyScalePulse){g_restoreExpected=g_original;g_phase.store(3);g_phaseStart=now;Snapshot("scale_pulse_skipped",object);return;}
+            if(!EnableJitterPulse()){Log("{\"event\":\"jitter_pulse_refused\",\"changes_scale\":false}");g_done.store(true);return;}
             // Diagnostic ratio, not an NGX mode or an SR integration. Preserve engine alignment.
             g_setter(object,2.0f/3.0f,true);
             g_expected=Value(object,0x1f0);g_changed.store(true);g_phase.store(2);g_phaseStart=now;
             Snapshot("target_requested",object);return;
         }
         if(phase==2) {
+            if(!JitterPulseStillOwned()){Restore(object,"external_jitter_mode_change");return;}
             if(!Near(Value(object,0x1f0),g_expected)) {Restore(object,"external_scale_change");return;}
             if(!g_targetObserved&&Near(Value(object,0x1f4),g_expected)) {g_targetObserved=true;Snapshot("target_active",object);}
             if(now-g_phaseStart>=3000) Restore(object,"window_complete");
@@ -206,7 +216,8 @@ void PrepareGameHook() {
     Log(std::string("{\"event\":\"hook_created\",\"target\":\"quad\",\"status\":\"")+MH_StatusToString(status)+"\"}");
     if(status!=MH_OK)throw std::runtime_error("Quad hook creation failed");
     PrepareSceneScopeHook();
-    Log("{\"event\":\"game_hooks_prepared\",\"version\":3,\"game_hook_count\":4,\"hook_enabled\":false,\"changes_scale\":false}");
+    if(g_tracePostTaa)PrepareEngineVertexHook();
+    Log(std::string("{\"event\":\"game_hooks_prepared\",\"version\":3,\"game_hook_count\":")+(g_tracePostTaa?"5":"4")+",\"hook_enabled\":false,\"changes_scale\":false}");
 }
 void Install() {
     const auto core=GetModuleHandleW(L"D3D12Core.dll");
@@ -260,13 +271,18 @@ void ReadBridgeConfiguration(const std::filesystem::path& ini) {
     g_requireFrameGenOff=GetPrivateProfileIntW(L"Experiment",L"RequireFrameGenOff",1,ini.c_str())!=0;
     g_applyScalePulse=GetPrivateProfileIntW(L"Experiment",L"ApplyScalePulse",1,ini.c_str())!=0;
     g_gameHooks=GetPrivateProfileIntW(L"Experiment",L"GameHooks",1,ini.c_str())!=0;
+    g_tracePostTaa=GetPrivateProfileIntW(L"Experiment",L"TracePostTaa",0,ini.c_str())!=0;
+    g_pulseJitter=GetPrivateProfileIntW(L"Experiment",L"PulseJitter",0,ini.c_str())!=0;
     if(!g_gameHooks)g_applyScalePulse=false;
+    if(g_pulseJitter&&(!g_gameHooks||!g_applyScalePulse))throw std::runtime_error("Jitter diagnostic requires the bounded engine scale pulse");
     Log("{\"event\":\"bridge_configuration\",\"version\":3,\"expected_proxy_sha256\":\""+g_expectedProxyHash+
         "\",\"requires_framegen_off\":"+(g_requireFrameGenOff?"true":"false")+",\"applies_scale_pulse\":"+(g_applyScalePulse?"true":"false")+
-        ",\"game_hooks\":"+(g_gameHooks?"true":"false")+"}");
+        ",\"game_hooks\":"+(g_gameHooks?"true":"false")+",\"trace_post_taa\":"+(g_tracePostTaa?"true":"false")+
+        ",\"pulses_projection_jitter\":"+(g_pulseJitter?"true":"false")+"}");
 }
 void Stop() noexcept {
     g_ready.store(false);bool restored=true;
+    RestoreJitterPulse();
     for(auto& hook:g_hooks)if(hook.enabled){
         if(memcmp(hook.address,hook.patch.data(),16)||MH_DisableHook(hook.address)!=MH_OK)restored=false;
         else hook.enabled=false;
@@ -279,7 +295,8 @@ void Stop() noexcept {
         for(const auto& item:g_views)Log("{\"event\":\"viewport_count\",\"phase\":"+std::to_string(std::get<0>(item.first))+
             ",\"width\":"+std::to_string(std::get<1>(item.first))+",\"height\":"+std::to_string(std::get<2>(item.first))+",\"count\":"+std::to_string(item.second)+"}");
         Log("{\"event\":\"quad_summary\",\"all_quad_calls\":"+std::to_string(g_quadCalls.load())+",\"focused_quad_calls\":"+std::to_string(g_focusedQuadCalls.load())+",\"unique_quad_records\":"+std::to_string(uniqueQuads)+"}");
-        Log(std::string("{\"event\":\"stopped\",\"owned_hooks_restored\":")+(restored?"true":"false")+",\"scale_override_pending\":"+(g_changed.load()?"true":"false")+"}");
+        Log(std::string("{\"event\":\"stopped\",\"owned_hooks_restored\":")+(restored?"true":"false")+",\"scale_override_pending\":"+(g_changed.load()?"true":"false")+
+            ",\"jitter_override_pending\":"+(g_jitterChanged.load()?"true":"false")+"}");
     }catch(...){}
 }
 DWORD WINAPI Worker(void*) {

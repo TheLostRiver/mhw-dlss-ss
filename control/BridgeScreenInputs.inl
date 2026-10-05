@@ -13,6 +13,7 @@ struct ExtraTaaConstant {unsigned root=0;UINT64 address=0;std::array<uint32_t,16
 struct TaaScreenInput {
     UINT64 camera=0,screen=0;std::array<uint32_t,27> words{};unsigned error=0;
     float jitter[2]{},previousJitter[2]{};bool cameraValid=false;
+    std::array<uint32_t,48> projectionWords{};bool projectionCopied=false;
     std::array<ExtraTaaConstant,4> extra{};
 };
 float ScreenFloat(const TaaScreenInput& s,unsigned byteOffset) {float value;memcpy(&value,&s.words[byteOffset/4],4);return value;}
@@ -75,6 +76,9 @@ TaaScreenInput ReadTaaScreen(ID3D12GraphicsCommandList* list) {
         out.cameraValid=CopyConstantBytes(camera+160,out.jitter,8)&&CopyConstantBytes(camera+704,out.previousJitter,8);
         for(unsigned i=0;i<2;++i)out.cameraValid=out.cameraValid&&std::isfinite(out.jitter[i])&&std::isfinite(out.previousJitter[i])&&
             std::fabs(out.jitter[i])<0.1f&&std::fabs(out.previousJitter[i])<0.1f;
+        if(out.camera-g_screenGpuBase<=g_screenBytes-864)
+            out.projectionCopied=CopyConstantBytes(camera+128,out.projectionWords.data(),64)&&
+                CopyConstantBytes(camera+672,out.projectionWords.data()+16,64)&&CopyConstantBytes(camera+800,out.projectionWords.data()+32,64);
     }
     for(auto& extra:out.extra)if(extra.address>=g_screenGpuBase&&extra.address-g_screenGpuBase<=g_screenBytes-sizeof(extra.words)&&(extra.address&255)==0)
         extra.copied=CopyConstantBytes(g_screenMapped+(extra.address-g_screenGpuBase),extra.words.data(),sizeof(extra.words));
@@ -104,6 +108,16 @@ void RecordTaaScreen(const TaaTrace& trace,const TaaScreenInput& s) {
     if(s.cameraValid){out<<",\"projection_jitter\":["<<s.jitter[0]<<','<<s.jitter[1]<<"],\"previous_projection_jitter\":["
         <<s.previousJitter[0]<<','<<s.previousJitter[1]<<']';
         if(!s.error)out<<",\"candidate_view_pixel_jitter\":["<<s.jitter[0]*float(s.words[10])*-0.5f<<','<<s.jitter[1]*float(s.words[11])*0.5f<<']';}
+    // Sample eight complete projection matrix triples at each measured size.
+    // A readable zero jitter pair alone does not validate the camera layout.
+    bool matrixSample=false;
+    if(!s.error&&s.projectionCopied) {
+        static std::map<std::pair<unsigned,unsigned>,unsigned> counts;
+        std::lock_guard<std::mutex> lock(g_bridgeMutex);const auto key=std::make_pair(s.words[10],s.words[11]);
+        if(counts.size()<8||counts.count(key)){auto& count=counts[key];matrixSample=count<8;if(matrixSample)++count;}
+    }
+    if(matrixSample){out<<",\"projection_matrix_offsets\":[128,672,800],\"projection_matrix_raw_words\":[";
+        for(unsigned i=0;i<s.projectionWords.size();++i){if(i)out<<',';out<<s.projectionWords[i];}out<<']';}
     out<<",\"additional_constants\":[";bool first=true;
     for(const auto& extra:s.extra)if(extra.address){if(!first)out<<',';first=false;out<<"{\"root\":"<<extra.root<<",\"address\":\"0x"<<std::hex
         <<extra.address<<std::dec<<"\",\"copied\":"<<(extra.copied?"true":"false")<<",\"raw_words\":[";

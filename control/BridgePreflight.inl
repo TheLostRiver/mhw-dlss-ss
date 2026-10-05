@@ -5,11 +5,16 @@ using DispatchCallback=bool(__fastcall*)(void*,ID3D12GraphicsCommandList*,UINT,U
 using ResetCallback=HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,ID3D12CommandAllocator*,ID3D12PipelineState*);
 PsoCallback g_psoCallback{};DispatchCallback g_dispatchCallback{};ResetCallback g_listReset{};
 unsigned char* g_mhwss{};
+#include "BridgeJitterPulse.inl"
 mhwsr::Dispatch g_ngx{};
 std::mutex g_bridgeMutex;
+struct VertexCopyRange {UINT64 destination=0,source=0,bytes=0;};
 struct ListTrace {
     ID3D12PipelineState* pso{};D3D12_VIEWPORT view{};bool hasView=false;uint64_t generation=0;
     std::array<UINT64,16> cbvs{};std::array<uint64_t,16> cbvEpochs{};uint64_t bindEpoch=0,lastTaaEpoch=0;
+    D3D12_VERTEX_BUFFER_VIEW vertex{};uint64_t taaSerial=0;unsigned postTaaOps=0;mhwsr::Size taaInput{},taaOutput{};
+    uintptr_t vertexCaller=0;
+    std::array<VertexCopyRange,16> vertexCopies{};unsigned vertexCopyCount=0;
 };
 std::unordered_map<ID3D12GraphicsCommandList*,ListTrace> g_bridgeLists;
 struct TaaTrace {
@@ -97,6 +102,9 @@ void SaveBridge(const std::string& row) {
     if(g_bridgeRecords.size()<768)g_bridgeRecords.push_back(row);else ++g_traceDrops;
 }
 #include "BridgeScreenInputs.inl"
+#include "BridgeVertexReader.inl"
+#include "BridgeEngineVertices.inl"
+#include "BridgePostTaaTrace.inl"
 void QueryBridgePlans(const TaaTrace& t) {
     if(!t.size[0]||!t.size[1]||t.size[0]>16384||t.size[1]>16384)return;
     if(g_queried.exchange(true))return;
@@ -163,6 +171,12 @@ bool __fastcall OnMhwDispatch(void* self,ID3D12GraphicsCommandList* list,UINT x,
         trace.serial=++g_taaDispatches;trace.tick=GetTickCount64();trace.engineUpdate=g_engineUpdates.load();
         trace.sceneInvocation=g_sceneInvocation.serial;
         MainState(&trace);g_threadTaa=trace;if(result)++g_nativeBypasses;
+        {
+            std::lock_guard<std::mutex> lock(g_bridgeMutex);auto& state=g_bridgeLists[list];
+            state.taaSerial=screen.error?0:trace.serial;state.postTaaOps=0;
+            if(!screen.error){state.taaInput={screen.words[10],screen.words[11]};
+                state.taaOutput={static_cast<unsigned>(ScreenFloat(screen,16)),static_cast<unsigned>(ScreenFloat(screen,20))};}
+        }
         RecordTaaScreen(trace,screen);
         QueryBridgePlans(trace);
     }catch(...){++g_traceDrops;}
@@ -234,6 +248,10 @@ void PrepareSceneScopeHook() {
     const std::array<unsigned char,16> viewport{0x40,0x55,0x53,0x48,0x8d,0x6c,0x24,0xe8,0x48,0x81,0xec,0x18,0x01,0x00,0x00,0x8b};
     BridgeHook(7,reinterpret_cast<unsigned char*>(g_game)+0x23d0330,viewport,reinterpret_cast<void*>(&OnSceneViewport),g_sceneViewport);
 }
+void PrepareEngineVertexHook() {
+    const std::array<unsigned char,16> signature{0x48,0x8b,0xc4,0x48,0x89,0x58,0x18,0x55,0x56,0x41,0x56,0x48,0x8b,0xec,0x48,0x83};
+    BridgeHook(15,reinterpret_cast<unsigned char*>(g_game)+0x259e470,signature,reinterpret_cast<void*>(&OnEngineVertices),g_engineVertices);
+}
 bool KnownNgxPointer(void* pointer,bool allowProbe) {
     HMODULE module{};
     if(!pointer||!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,reinterpret_cast<LPCWSTR>(pointer),&module))return false;
@@ -277,11 +295,30 @@ void PrepareBridgeHooks() {
     if(!KnownNgxPointer(capPointer,false)||!KnownNgxPointer(destroyPointer,false))
         throw std::runtime_error("NGX parameter dispatch owner differs");
     g_ngx.capabilities=reinterpret_cast<mhwsr::Parameters>(capPointer);g_ngx.destroy=reinterpret_cast<mhwsr::Destroy>(destroyPointer);
+    if(g_tracePostTaa) {
+        HMODULE proxy{};
+        if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(capPointer),&proxy)||
+           FileSha256(ModulePath(proxy))!="e78c757c483631364985efe79806fe81ca7f8fc1b9d2b6451b4736052fa72011")
+            throw std::runtime_error("Post-TAA observation requires the inspected proxy build");
+        // The live Core DrawInstanced relay was independently followed to this
+        // proxy entry. Chain the owner function instead of overwriting its relay.
+        const std::array<unsigned char,16> draw{0x40,0x55,0x53,0x56,0x57,0x48,0x8d,0x6c,0x24,0xe8,0x48,0x81,0xec,0x18,0x01,0x00};
+        const std::array<unsigned char,16> vertices{0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8b,0xd9,0x48,0x8b,0x41,0x58,0x4c,0x8b,0x1d};
+        BridgeHook(10,reinterpret_cast<unsigned char*>(proxy)+0x178930,draw,reinterpret_cast<void*>(&OnBridgeDraw),g_draw);
+        BridgeHook(11,core+0x12a660,vertices,reinterpret_cast<void*>(&OnBridgeVertices),g_vertexBuffers);
+        const std::array<unsigned char,16> gpuva{0x48,0x8b,0x81,0x68,0x01,0x00,0x00,0xc3,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc};
+        BridgeHook(12,core+0x10d230,gpuva,reinterpret_cast<void*>(&OnBridgeGpuAddress),g_gpuAddress);
+        const std::array<unsigned char,16> copy{0x40,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0x6c};
+        BridgeHook(13,core+0x130c80,copy,reinterpret_cast<void*>(&OnBridgeBufferCopy),g_bufferCopy);
+        const std::array<unsigned char,16> map{0x40,0x53,0x55,0x56,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0x80,0x00};
+        BridgeHook(14,core+0x10d010,map,reinterpret_cast<void*>(&OnBridgeResourceMap),g_resourceMap);
+    }
     OpenScreenReader();
     Log("{\"event\":\"bridge_preflight_prepared\",\"version\":3,\"modifies_ngx_dispatch\":false,\"changes_copy\":false,\"queries_capabilities\":true,\"evaluates_sr\":false}");
 }
 void FinishBridge() {
     CloseScreenReader();
+    CloseVertexReaders();
     try {
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
         for(const auto& row:g_bridgeRecords)Log(row);
@@ -293,6 +330,12 @@ void FinishBridge() {
             ",\"engine_input_rects\":"+std::to_string(g_sceneRectsObserved.load())+
             ",\"valid_taa_screen_inputs\":"+std::to_string(g_taaScreenValid.load())+",\"invalid_taa_screen_inputs\":"+std::to_string(g_taaScreenInvalid.load())+
             ",\"compute_cbv_bindings\":"+std::to_string(g_computeCbvCalls.load())+
+            ",\"post_taa_draws\":"+std::to_string(g_postTaaDraws.load())+",\"matching_post_taa_triangles\":"+std::to_string(g_matchingPostTaaTriangles.load())+
+            ",\"gpu_address_calls\":"+std::to_string(g_gpuAddressCalls.load())+",\"mapped_vertex_buffers\":"+std::to_string(g_vertexArenaCount)+
+            ",\"vertex_read_hits\":"+std::to_string(g_vertexReadHits.load())+",\"vertex_read_misses\":"+std::to_string(g_vertexReadMisses.load())+
+            ",\"buffer_copy_calls\":"+std::to_string(g_bufferCopyCalls.load())+",\"vertex_buffer_copies\":"+std::to_string(g_vertexBufferCopies.load())+
+            ",\"resource_map_calls\":"+std::to_string(g_resourceMapCalls.load())+
+            ",\"engine_vertex_candidates\":"+std::to_string(g_engineVertexCandidates.load())+",\"engine_vertex_references\":"+std::to_string(g_engineVertexReferences.load())+
             ",\"mhwss_handled_taa\":"+std::to_string(g_nativeBypasses.load())+",\"trace_drops\":"+std::to_string(g_traceDrops.load())+",\"evaluates_sr\":false}");
     }catch(...){}
 }

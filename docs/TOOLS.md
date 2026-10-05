@@ -21,7 +21,7 @@ cmd /c start MHWSSLauncher.exe & rem %command%
 | `MhwScreenProbe_v4.dll` | 读取已定位的 CPU 可见 CBScreen 数据 | `tools/screen_control.ps1` |
 | `MhwScalePilot_v4.dll` | 短暂改变内部比例并恢复 | `tools/scale_control.ps1` |
 | `MhwQuadPilot.dll` | 比例脉冲，同时记录特定后处理取样矩形 | 同上，`-Observer MhwQuadPilot` |
-| `MhwSrBridge.dll` | 场景/TAA/quad 关联前置采集及尺寸查询 | 同上，`-Observer MhwSrBridge`；尚未运行验证 |
+| `MhwSrBridge.dll` | 当帧 TAA 输入、后 TAA 顶点采集、尺寸查询和可选短时抖动控制 | 同上，`-Observer MhwSrBridge`；未执行 SR |
 | `MhwD3D12Methods.exe` | 在进程外取得本机 D3D12 方法信息 | 为捕获配置提供方法 RVA、签名与适配器信息 |
 | `MhwProbeInjector.exe` | 显式指定目标游戏 PID 与 DLL 路径的加载工具 | 不会自动选择或启动游戏 |
 
@@ -38,7 +38,7 @@ cmd /c start MHWSSLauncher.exe & rem %command%
 Enabled=1
 ```
 
-桥接前置采集的配置还可包含以下两项；`NgxProxySha256` 必须替换为已核对的实际代理 SHA-256，不能直接使用占位文字：
+桥接前置采集可包含以下选项；`NgxProxySha256` 必须替换为已核对的实际代理 SHA-256，不能直接使用占位文字：
 
 ```ini
 [Experiment]
@@ -46,6 +46,8 @@ Enabled=1
 RequireFrameGenOff=1
 ApplyScalePulse=1
 GameHooks=1
+TracePostTaa=0
+PulseJitter=0
 
 [Compatibility]
 NgxProxySha256=<已核对的64位十六进制SHA256>
@@ -55,7 +57,11 @@ NgxProxySha256=<已核对的64位十六进制SHA256>
 
 研究 TAA 输入时，必须确认**游戏内**原生抗锯齿已设为 TAA；磁盘配置不一定反映尚未保存的运行设置。MHWSS 的 Upscaler 仍可保持 None，不需要启用 DLAA。
 
-只读输入窗口使用 `GameHooks=0`，此时不设置内部比例。相机记录和附加常量读取属于 v3 的新增采集内容，不能把已完成的高档尺寸验证扩大解释为低档或完整时域验证。
+只读输入窗口使用 `GameHooks=0`，此时不设置内部比例。高／低内部尺寸现已分别得到实际 TAA CBV 验证，但这不代表完整时域验证。
+
+`PulseJitter=1` 要求 `GameHooks=1` 且 `ApplyScalePulse=1`，只在约 3 秒脉冲中启用已核对的 MHWSS 投影抖动开关，并自动恢复。它不是 DLAA/SR 开关。None 模式的基线记录可能合法地全为零；`camera_valid` 不代表抖动非零，使用汇总脚本核对实际数值。
+
+`TracePostTaa=1` 增加后 TAA 绘制、顶点绑定、有限资源发现和引擎顶点资源关联观察。此路径额外绑定已核对的代理绘制入口和游戏代码版本。它读取少量上传缓冲区字节，不修改绘制或执行 SR；详细边界见 [桥接说明](BRIDGE.md)。
 
 进入可移动场景后，在 PowerShell 使用实际 PID：
 
@@ -84,7 +90,7 @@ python tools/decode_texture_capture.py evidence/my-replay
 - `inspect_pe.py`、`trace_pe.py`、`extract_shaders.py`：针对使用者自行提供的二进制做静态分析。
 - `inspect_*runtime.py`、`inspect_command_list.py` 等：只读当前进程资料，输出留在本地。
 - `summarize_*.py`、`compare_capture_stages.py`：汇总保存的参数和采集日志。
-- `summarize_bridge.py`：汇总桥接前置日志中的同次场景调用、实际输入矩形和恢复状态；不把 CPU 关联结果解释为 SR 已可用。
+- `summarize_bridge.py`：汇总实际输入矩形、零/非零抖动、相邻历史连续性、顶点 UV 和恢复状态；不把参数/CPU 顶点观察解释为 SR 已可用。
 - `decode_texture_capture.py`、`analyze_low_roi.py`：分析自己的原始纹理；预览图是诊断可视化。
 - `analyze_jitter_coverage.py`：可用 `--high`、`--low` 指定参数记录，离线比对抖动样本。
 - `analyze_bridge_sites.py`：读取 `inspect_pe.py` 生成的证据 JSON；可用 `--evidence` 指定文件。
