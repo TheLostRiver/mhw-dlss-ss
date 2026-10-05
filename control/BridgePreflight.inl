@@ -17,9 +17,11 @@ struct TaaTrace {
 thread_local TaaTrace g_threadTaa{};
 using ScenePass=uintptr_t(__fastcall*)(void*,void*,unsigned,uintptr_t);
 ScenePass g_scenePass{};
-struct SceneInvocation {uint64_t serial=0;uintptr_t context=0,scene=0;int outputRect[4]{},inputRect[4]{};float scale=0;};
+using SceneViewport=uintptr_t(__fastcall*)(void*,const int*);
+SceneViewport g_sceneViewport{};
+struct SceneInvocation {uint64_t serial=0;uintptr_t context=0,scene=0;int outputRect[4]{},inputRect[4]{},predictedRect[4]{};float scale=0;bool inputObserved=false;};
 thread_local SceneInvocation g_sceneInvocation{};
-std::atomic<uint64_t> g_scenePasses{0},g_matchingInvocations{0};
+std::atomic<uint64_t> g_scenePasses{0},g_matchingInvocations{0},g_sceneRectsObserved{0};
 bool ReadSceneInvocation(void* context,void* scene,SceneInvocation* out) noexcept {
     __try {
         auto* renderer=static_cast<unsigned char*>(Renderer());if(!renderer||!scene||!context)return false;
@@ -38,18 +40,37 @@ uintptr_t __fastcall OnScenePass(void* context,void* scene,unsigned flags,uintpt
     g_sceneInvocation={};g_threadTaa={};
     if(g_ready.load()&&!g_done.load()) {
         SceneInvocation candidate{};
-        if(ReadSceneInvocation(context,scene,&candidate)&&std::isfinite(candidate.scale)&&candidate.scale>=0.5f&&candidate.scale<=1.0f&&
-           candidate.outputRect[0]==0&&candidate.outputRect[1]==0&&candidate.outputRect[2]>=1280&&candidate.outputRect[2]<=16384&&
-           candidate.outputRect[3]>=720&&candidate.outputRect[3]<=16384) {
+        if(ReadSceneInvocation(context,scene,&candidate)&&std::isfinite(candidate.scale)&&candidate.scale>=0.5f&&candidate.scale<=1.0f) {
             // Match 0x23c38a8..0x23c3908: single-precision multiply followed
             // by cvttss2si (truncate), then preserve that source rectangle on stack.
-            for(unsigned i=0;i<4;++i)candidate.inputRect[i]=int(float(candidate.outputRect[i])*candidate.scale);
+            for(unsigned i=0;i<4;++i)if(candidate.outputRect[i]>=0&&candidate.outputRect[i]<=16384)
+                candidate.predictedRect[i]=int(float(candidate.outputRect[i])*candidate.scale);
             candidate.serial=++g_scenePasses;g_sceneInvocation=candidate;
         }
     }
     return g_scenePass(context,scene,flags,tag);
 }
+bool ReadActualSceneRect(void* context,const int* rect,SceneInvocation* scope) noexcept {
+    __try {
+        if(*reinterpret_cast<uintptr_t*>(static_cast<unsigned char*>(context)+0x1d0)!=scope->scene)return false;
+        memcpy(scope->inputRect,rect,16);memcpy(scope->outputRect,static_cast<unsigned char*>(context)+0x5c,16);
+        return true;
+    }__except(EXCEPTION_EXECUTE_HANDLER){return false;}
+}
+uintptr_t __fastcall OnSceneViewport(void* context,const int* rect) {
+    const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress())-reinterpret_cast<uintptr_t>(g_game);
+    if(g_ready.load()&&!g_done.load()&&caller==0x23c391f&&g_sceneInvocation.serial&&
+       g_sceneInvocation.context==reinterpret_cast<uintptr_t>(context)&&ReadActualSceneRect(context,rect,&g_sceneInvocation)) {
+        const auto& d=g_sceneInvocation;
+        g_sceneInvocation.inputObserved=d.inputRect[0]==0&&d.inputRect[1]==0&&d.outputRect[0]==0&&d.outputRect[1]==0&&
+            d.inputRect[2]>0&&d.inputRect[3]>0&&d.inputRect[2]<=d.outputRect[2]&&d.inputRect[3]<=d.outputRect[3]&&
+            d.outputRect[2]<=16384&&d.outputRect[3]<=16384;
+        if(g_sceneInvocation.inputObserved)++g_sceneRectsObserved;
+    }
+    return g_sceneViewport(context,rect);
+}
 std::atomic<uint64_t> g_taaDispatches{0},g_correlations{0},g_missingTaa{0},g_traceDrops{0},g_nativeBypasses{0};
+std::atomic<uint64_t> g_psoCallbacks{0},g_dispatchCallbacks{0};
 std::atomic<bool> g_queried{false};
 std::vector<std::string> g_bridgeRecords;
 
@@ -87,6 +108,7 @@ void QueryBridgePlans(const TaaTrace& t) {
 }
 bool __fastcall OnMhwPso(void* self,ID3D12GraphicsCommandList* list,ID3D12PipelineState* pso) {
     if(g_ready.load()&&!g_done.load())try {
+        ++g_psoCallbacks;
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
         if(g_bridgeLists.size()<512||g_bridgeLists.count(list))g_bridgeLists[list].pso=pso;else ++g_traceDrops;
     }catch(...){++g_traceDrops;}
@@ -95,6 +117,7 @@ bool __fastcall OnMhwPso(void* self,ID3D12GraphicsCommandList* list,ID3D12Pipeli
 bool __fastcall OnMhwDispatch(void* self,ID3D12GraphicsCommandList* list,UINT x,UINT y,UINT z) {
     TaaTrace trace{};bool matched=false;
     if(g_ready.load()&&!g_done.load())try {
+        ++g_dispatchCallbacks;
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
         const auto found=g_bridgeLists.find(list);
         if(found!=g_bridgeLists.end()&&NativeTaaPso(found->second.pso)) {
@@ -134,7 +157,7 @@ void RecordBridgeQuad(uintptr_t caller,void* context,const QuadData& d) {
     const auto trace=g_threadTaa;g_threadTaa={};
     if(!trace.serial){++g_missingTaa;return;}
     ++g_correlations;
-    const bool sameInvocation=trace.sceneInvocation&&trace.sceneInvocation==g_sceneInvocation.serial&&
+    const bool sameInvocation=g_sceneInvocation.inputObserved&&trace.sceneInvocation&&trace.sceneInvocation==g_sceneInvocation.serial&&
         g_sceneInvocation.context==reinterpret_cast<uintptr_t>(context)&&g_sceneInvocation.scene==d.contextScene&&
         !memcmp(g_sceneInvocation.inputRect,d.rect,16)&&!memcmp(g_sceneInvocation.outputRect,d.contextRect,16);
     if(sameInvocation)++g_matchingInvocations;
@@ -154,6 +177,7 @@ void RecordBridgeQuad(uintptr_t caller,void* context,const QuadData& d) {
     if(trace.hasView)out<<'['<<trace.view.TopLeftX<<','<<trace.view.TopLeftY<<','<<trace.view.Width<<','<<trace.view.Height<<']';else out<<"null";
     out<<",\"taa_scene_invocation\":"<<trace.sceneInvocation<<",\"quad_scene_invocation\":"<<g_sceneInvocation.serial
        <<",\"same_scene_invocation_and_rect\":"<<(sameInvocation?"true":"false")
+       <<",\"input_rect_observed_at_engine_call\":"<<(g_sceneInvocation.inputObserved?"true":"false")
        <<",\"scope_input_rect\":[";
     for(unsigned i=0;i<4;++i){if(i)out<<',';out<<g_sceneInvocation.inputRect[i];}
     out<<"],\"frame_association_proven\":false,\"changes_copy\":false,\"evaluates_sr\":false}";
@@ -169,6 +193,8 @@ void PrepareSceneScopeHook() {
     // Followed the PE chained unwind metadata to the real prologue, not a middle fragment.
     const std::array<unsigned char,16> signature{0x44,0x89,0x44,0x24,0x18,0x48,0x89,0x54,0x24,0x10,0x55,0x53,0x41,0x54,0x41,0x55};
     BridgeHook(6,reinterpret_cast<unsigned char*>(g_game)+0x23c3790,signature,reinterpret_cast<void*>(&OnScenePass),g_scenePass);
+    const std::array<unsigned char,16> viewport{0x55,0x53,0x48,0x8d,0x6c,0x24,0xe8,0x48,0x81,0xec,0x18,0x01,0x00,0x00,0x8b,0x41};
+    BridgeHook(7,reinterpret_cast<unsigned char*>(g_game)+0x23d0330,viewport,reinterpret_cast<void*>(&OnSceneViewport),g_sceneViewport);
 }
 bool KnownNgxPointer(void* pointer,bool allowProbe) {
     HMODULE module{};
@@ -177,8 +203,10 @@ bool KnownNgxPointer(void* pointer,bool allowProbe) {
     // Preserve the known parameter observer chain; never overwrite any dispatch slot.
     if(allowProbe&&_wcsicmp(name.c_str(),L"MhwSrProbe.dll")==0)
         ok=FileSha256(path)=="42de0846e46a593fd1b3743abd92e1e0b098760b575322867977127a750618c7";
-    else if(_wcsicmp(name.c_str(),L"d3d12.dll")==0)
-        ok=FileSha256(path)=="73cf97e5c1a3db2be778df25d21b2999e664a06c6e0f64e67741987a21228a24";
+    else if(_wcsicmp(name.c_str(),L"d3d12.dll")==0) {
+        const auto digest=FileSha256(path);ok=!g_expectedProxyHash.empty()&&digest==g_expectedProxyHash;
+        Log("{\"event\":\"ngx_proxy_identity\",\"sha256\":\""+digest+"\",\"matches_expected\":"+(ok?"true":"false")+"}");
+    }
     else ok=_wcsicmp(name.c_str(),L"_nvngx.dll")==0||_wcsicmp(name.c_str(),L"nvngx.dll")==0||module==reinterpret_cast<HMODULE>(g_mhwss);
     FreeLibrary(module);return ok;
 }
@@ -207,15 +235,17 @@ void PrepareBridgeHooks() {
     if(!KnownNgxPointer(capPointer,false)||!KnownNgxPointer(destroyPointer,false))
         throw std::runtime_error("NGX parameter dispatch owner differs");
     g_ngx.capabilities=reinterpret_cast<mhwsr::Parameters>(capPointer);g_ngx.destroy=reinterpret_cast<mhwsr::Destroy>(destroyPointer);
-    Log("{\"event\":\"bridge_preflight_prepared\",\"version\":1,\"modifies_ngx_dispatch\":false,\"changes_copy\":false,\"queries_capabilities\":true,\"evaluates_sr\":false}");
+    Log("{\"event\":\"bridge_preflight_prepared\",\"version\":2,\"modifies_ngx_dispatch\":false,\"changes_copy\":false,\"queries_capabilities\":true,\"evaluates_sr\":false}");
 }
 void FinishBridge() {
     try {
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
         for(const auto& row:g_bridgeRecords)Log(row);
         Log("{\"event\":\"bridge_order_summary\",\"taa_dispatches\":"+std::to_string(g_taaDispatches.load())+
+            ",\"pso_callbacks\":"+std::to_string(g_psoCallbacks.load())+",\"dispatch_callbacks\":"+std::to_string(g_dispatchCallbacks.load())+
             ",\"same_thread_taa_quad_pairs\":"+std::to_string(g_correlations.load())+",\"quads_without_thread_taa\":"+std::to_string(g_missingTaa.load())+
             ",\"scene_invocations\":"+std::to_string(g_scenePasses.load())+",\"same_invocation_and_rect_pairs\":"+std::to_string(g_matchingInvocations.load())+
+            ",\"engine_input_rects\":"+std::to_string(g_sceneRectsObserved.load())+
             ",\"mhwss_handled_taa\":"+std::to_string(g_nativeBypasses.load())+",\"trace_drops\":"+std::to_string(g_traceDrops.load())+",\"evaluates_sr\":false}");
     }catch(...){}
 }

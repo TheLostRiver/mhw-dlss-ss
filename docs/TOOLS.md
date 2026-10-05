@@ -38,6 +38,19 @@ cmd /c start MHWSSLauncher.exe & rem %command%
 Enabled=1
 ```
 
+桥接前置采集的配置还可包含以下两项；`NgxProxySha256` 必须替换为已核对的实际代理 SHA-256，不能直接使用占位文字：
+
+```ini
+[Experiment]
+Enabled=1
+RequireFrameGenOff=1
+
+[Compatibility]
+NgxProxySha256=<已核对的64位十六进制SHA256>
+```
+
+默认要求现有 `OptiScaler.ini` 的 `[FrameGen] Enabled=false`。如果采集期间图像质量、MHWSS 选项或这项帧生成配置发生变化，观察器请求恢复内部比例。
+
 进入可移动场景后，在 PowerShell 使用实际 PID：
 
 ```powershell
@@ -65,6 +78,7 @@ python tools/decode_texture_capture.py evidence/my-replay
 - `inspect_pe.py`、`trace_pe.py`、`extract_shaders.py`：针对使用者自行提供的二进制做静态分析。
 - `inspect_*runtime.py`、`inspect_command_list.py` 等：只读当前进程资料，输出留在本地。
 - `summarize_*.py`、`compare_capture_stages.py`：汇总保存的参数和采集日志。
+- `summarize_bridge.py`：汇总桥接前置日志中的同次场景调用、实际输入矩形和恢复状态；不把 CPU 关联结果解释为 SR 已可用。
 - `decode_texture_capture.py`、`analyze_low_roi.py`：分析自己的原始纹理；预览图是诊断可视化。
 - `analyze_jitter_coverage.py`：可用 `--high`、`--low` 指定参数记录，离线比对抖动样本。
 - `analyze_bridge_sites.py`：读取 `inspect_pe.py` 生成的证据 JSON；可用 `--evidence` 指定文件。

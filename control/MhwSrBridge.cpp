@@ -37,7 +37,9 @@ std::mutex g_logMutex, g_viewsMutex;
 std::ofstream g_log;
 std::map<std::tuple<unsigned, unsigned, unsigned>, uint64_t> g_views;
 struct Hook { void* address{}; std::array<unsigned char,16> patch{},original{}; bool enabled=false; };
-std::array<Hook,7> g_hooks{};
+std::array<Hook,8> g_hooks{};
+std::string g_expectedProxyHash;
+bool g_requireFrameGenOff=true;
 std::atomic<uint64_t> g_engineUpdates{0};
 void PrepareBridgeHooks();
 void PrepareSceneScopeHook();
@@ -201,7 +203,7 @@ void PrepareGameHook() {
     Log(std::string("{\"event\":\"hook_created\",\"target\":\"quad\",\"status\":\"")+MH_StatusToString(status)+"\"}");
     if(status!=MH_OK)throw std::runtime_error("Quad hook creation failed");
     PrepareSceneScopeHook();
-    Log("{\"event\":\"game_hooks_prepared\",\"version\":1,\"game_hook_count\":3,\"hook_enabled\":false,\"changes_scale\":false}");
+    Log("{\"event\":\"game_hooks_prepared\",\"version\":2,\"game_hook_count\":4,\"hook_enabled\":false,\"changes_scale\":false}");
 }
 void Install() {
     const auto core=GetModuleHandleW(L"D3D12Core.dll");
@@ -219,7 +221,7 @@ void Install() {
         if(MH_EnableHook(hook.address)!=MH_OK)throw std::runtime_error("Hook enable failed");
         hook.enabled=true;memcpy(hook.patch.data(),hook.address,16);
     }
-    Log("{\"event\":\"attached\",\"version\":1,\"observes_quads\":true,\"bridge_mode\":\"preflight_only\",\"calls_engine_scale_setter\":true,\"queries_ngx_capabilities\":true,\"evaluates_sr\":false,\"target_ratio\":0.666666667,\"target_window_ms\":3000}");
+    Log("{\"event\":\"attached\",\"version\":2,\"observes_quads\":true,\"bridge_mode\":\"preflight_only\",\"calls_engine_scale_setter\":true,\"queries_ngx_capabilities\":true,\"evaluates_sr\":false,\"target_ratio\":0.666666667,\"target_window_ms\":3000}");
     g_ready.store(true);
 }
 std::string Setting(const std::filesystem::path& path,const std::string& key) {
@@ -233,6 +235,25 @@ std::string Setting(const std::filesystem::path& path,const std::string& key) {
         while(!value.empty()&&(value.back()=='\r'||value.back()==' '||value.back()=='\"'))value.pop_back();return value;
     }
     return {};
+}
+bool FrameGenDisabled(const std::filesystem::path& path) {
+    if(!g_requireFrameGenOff)return true;
+    if(!std::filesystem::exists(path))return true;
+    std::array<wchar_t,32> value{};
+    GetPrivateProfileStringW(L"FrameGen",L"Enabled",L"auto",value.data(),static_cast<DWORD>(value.size()),path.c_str());
+    return _wcsicmp(value.data(),L"false")==0||_wcsicmp(value.data(),L"off")==0||!wcscmp(value.data(),L"0");
+}
+void ReadBridgeConfiguration(const std::filesystem::path& ini) {
+    std::array<wchar_t,128> value{};
+    GetPrivateProfileStringW(L"Compatibility",L"NgxProxySha256",L"73cf97e5c1a3db2be778df25d21b2999e664a06c6e0f64e67741987a21228a24",
+        value.data(),static_cast<DWORD>(value.size()),ini.c_str());
+    const std::wstring raw=value.data();
+    if(raw.size()!=64)throw std::runtime_error("Expected proxy SHA256 must contain 64 hex characters");
+    for(auto c:raw){if(c>=L'A'&&c<=L'F')c+=L'a'-L'A';if(!((c>=L'0'&&c<=L'9')||(c>=L'a'&&c<=L'f')))
+        throw std::runtime_error("Expected proxy SHA256 contains a non-hex character");g_expectedProxyHash.push_back(static_cast<char>(c));}
+    g_requireFrameGenOff=GetPrivateProfileIntW(L"Experiment",L"RequireFrameGenOff",1,ini.c_str())!=0;
+    Log("{\"event\":\"bridge_configuration\",\"version\":2,\"expected_proxy_sha256\":\""+g_expectedProxyHash+
+        "\",\"requires_framegen_off\":"+(g_requireFrameGenOff?"true":"false")+"}");
 }
 void Stop() noexcept {
     g_ready.store(false);bool restored=true;
@@ -258,23 +279,26 @@ DWORD WINAPI Worker(void*) {
         const auto folder=ModulePath(g_self).parent_path(),ini=folder/L"MhwSrBridge.ini";
         if(GetPrivateProfileIntW(L"Experiment",L"Enabled",0,ini.c_str())!=1)return 0;
         g_log.open(folder/(L"MhwSrBridge-"+std::to_wstring(GetCurrentProcessId())+L".jsonl"),std::ios::app);
+        ReadBridgeConfiguration(ini);
         PrepareGameHook();
         const auto prefix=L"Local\\MhwSrBridge."+std::to_wstring(GetCurrentProcessId());
         controls[0]=CreateEventW(nullptr,TRUE,FALSE,(prefix+L".Cancel").c_str());
         controls[1]=CreateEventW(nullptr,FALSE,FALSE,(prefix+L".Start").c_str());
         if(!controls[0]||!controls[1])throw std::runtime_error("Control events unavailable");
-        Log("{\"event\":\"waiting_for_scene_signal\",\"version\":1,\"changes_scale\":false}");
+        Log("{\"event\":\"waiting_for_scene_signal\",\"version\":2,\"changes_scale\":false}");
         while(true) {
             const auto wait=WaitForMultipleObjects(2,controls,FALSE,250);
             if(wait==WAIT_OBJECT_0+1)break;
             if(wait==WAIT_OBJECT_0||GetPrivateProfileIntW(L"Experiment",L"Enabled",0,ini.c_str())!=1)throw std::runtime_error("Cancelled before change");
         }
-        const auto graphics=executable.parent_path()/L"graphics_option.ini",mhwss=executable.parent_path()/L"MHWSS"/L"MHWSS_config.toml";
+        const auto graphics=executable.parent_path()/L"graphics_option.ini",mhwss=executable.parent_path()/L"MHWSS"/L"MHWSS_config.toml",
+            optiscaler=executable.parent_path()/L"OptiScaler.ini";
         uint64_t stableSince=0;
-        Log("{\"event\":\"waiting_for_configuration\",\"version\":1,\"requires\":\"High, DX12, MHWSS None, stable 5 seconds\",\"writes_while_waiting\":false}");
+        Log("{\"event\":\"waiting_for_configuration\",\"version\":2,\"requires\":\"High, DX12, MHWSS None, configured FrameGen constraint, stable 5 seconds\",\"writes_while_waiting\":false}");
         while(true) {
             const auto now=GetTickCount64();
-            const bool allowed=Setting(graphics,"ResolutionScaling")=="High"&&Setting(graphics,"DirectX12Enable")=="On"&&Setting(mhwss,"Upscaler")=="None";
+            const bool allowed=Setting(graphics,"ResolutionScaling")=="High"&&Setting(graphics,"DirectX12Enable")=="On"&&
+                Setting(mhwss,"Upscaler")=="None"&&FrameGenDisabled(optiscaler);
             if(!allowed)stableSince=0;else if(!stableSince)stableSince=now;
             if(stableSince&&now-stableSince>=5000)break;
             if(WaitForSingleObject(controls[0],0)==WAIT_OBJECT_0||GetPrivateProfileIntW(L"Experiment",L"Enabled",0,ini.c_str())!=1)throw std::runtime_error("Cancelled before change");
@@ -284,7 +308,9 @@ DWORD WINAPI Worker(void*) {
         while(!g_done.load()) {
             Sleep(100);
             if(WaitForSingleObject(controls[0],0)==WAIT_OBJECT_0)g_abort.store(true);
-            if(Setting(graphics,"ResolutionScaling")!="High"||Setting(mhwss,"Upscaler")!="None")g_abort.store(true);
+            if(Setting(graphics,"ResolutionScaling")!="High"||Setting(graphics,"DirectX12Enable")!="On"||
+               Setting(mhwss,"Upscaler")!="None"||!FrameGenDisabled(optiscaler)||
+               GetPrivateProfileIntW(L"Experiment",L"Enabled",0,ini.c_str())!=1)g_abort.store(true);
             if(GetTickCount64()-started>20000) {
                 g_abort.store(true);
                 if(!g_changed.load()&&g_phase.load()<2)break;
