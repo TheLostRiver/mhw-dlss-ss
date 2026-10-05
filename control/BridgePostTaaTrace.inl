@@ -5,6 +5,21 @@ using Draw=void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,UINT,UINT,UINT,UI
 VertexBuffers g_vertexBuffers{};Draw g_draw{};
 std::atomic<uint64_t> g_postTaaDraws{0},g_matchingPostTaaTriangles{0};
 std::set<std::string> g_postDrawKinds;
+std::set<std::string> g_postQuadKinds;
+void RecordPostTaaQuadVertices(const ListTrace& state,UINT vertices,UINT instances,UINT firstVertex,UINT firstInstance) {
+    if(!g_traceTextures||vertices!=4||instances!=1||firstInstance||state.postTaaOps>3||state.vertex.StrideInBytes!=16)return;
+    const UINT64 offset=UINT64(firstVertex)*16;
+    if(offset+64>state.vertex.SizeInBytes||state.vertex.BufferLocation>UINT64_MAX-offset)return;
+    float data[16]{};UINT64 base=0;bool mapped=CopyVertexBytes(state.vertex.BufferLocation+offset,data,sizeof(data),base);
+    for(float v:data)if(!std::isfinite(v))mapped=false;
+    std::ostringstream key;key<<state.pso<<':'<<state.taaInput.width<<':'<<state.taaInput.height<<':'<<mapped;
+    {std::lock_guard<std::mutex> lock(g_bridgeMutex);if(g_postQuadKinds.count(key.str())||g_postQuadKinds.size()>=32)return;g_postQuadKinds.insert(key.str());}
+    std::ostringstream out;out<<std::setprecision(9)<<"{\"event\":\"post_taa_quad_vertices\",\"taa_serial\":"<<state.taaSerial<<",\"draw_index\":"<<state.postTaaOps
+        <<",\"pso\":\"0x"<<std::hex<<reinterpret_cast<uintptr_t>(state.pso)<<std::dec<<"\",\"input\":["<<state.taaInput.width<<','<<state.taaInput.height
+        <<"],\"mapped\":"<<(mapped?"true":"false")<<",\"vertices\":[";
+    for(unsigned i=0;i<16;++i){if(i)out<<',';if(mapped)out<<data[i];else out<<"null";}
+    out<<"],\"changes_vertices\":false}";SaveBridge(out.str());
+}
 
 void STDMETHODCALLTYPE OnBridgeVertices(ID3D12GraphicsCommandList* list,UINT start,UINT count,const D3D12_VERTEX_BUFFER_VIEW* views) {
     if(g_ready.load()&&!g_done.load()&&start==0&&count)try {
@@ -23,6 +38,8 @@ void ObservePostTaaDraw(ID3D12GraphicsCommandList* list,UINT vertices,UINT insta
         ++found->second.postTaaOps;state=found->second;
     }
     ++g_postTaaDraws;
+    if(state.postTaaOps<=3)RecordTextureSnapshot(list,false,state.taaSerial,state.postTaaOps,vertices);
+    RecordPostTaaQuadVertices(state,vertices,instances,firstVertex,firstInstance);
     if(vertices!=3||instances!=1||firstInstance||state.vertex.StrideInBytes!=16)return;
     const UINT64 offset=UINT64(firstVertex)*16;
     if(offset+48>state.vertex.SizeInBytes)return;

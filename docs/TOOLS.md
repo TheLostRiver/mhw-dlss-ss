@@ -48,6 +48,7 @@ ApplyScalePulse=1
 GameHooks=1
 TracePostTaa=0
 PulseJitter=0
+TraceTextures=0
 
 [Compatibility]
 NgxProxySha256=<已核对的64位十六进制SHA256>
@@ -62,6 +63,8 @@ NgxProxySha256=<已核对的64位十六进制SHA256>
 `PulseJitter=1` 要求 `GameHooks=1` 且 `ApplyScalePulse=1`，只在约 3 秒脉冲中启用已核对的 MHWSS 投影抖动开关，并自动恢复。它不是 DLAA/SR 开关。None 模式的基线记录可能合法地全为零；`camera_valid` 不代表抖动非零，使用汇总脚本核对实际数值。
 
 `TracePostTaa=1` 增加后 TAA 绘制、顶点绑定、有限资源发现和引擎顶点资源关联观察。此路径额外绑定已核对的代理绘制入口和游戏代码版本。它读取少量上传缓冲区字节，不修改绘制或执行 SR；详细边界见 [桥接说明](BRIDGE.md)。
+
+`TraceTextures=1` 还要求 `GameHooks=1` 和 `TracePostTaa=1`，增加实际描述符、RTV、复制、scissor、图形常量、着色器容器及 MHWSS 深度准备观察。当前合计 32 个已核对入口。每种输入尺寸只保留前四帧的详细操作顺序，其他记录去重；容器写入 DLL 同目录 `shaders/`，原始数据仅用于本地研究。此选项不执行 SR，也不改变资源状态或复制参数。
 
 进入可移动场景后，在 PowerShell 使用实际 PID：
 
@@ -91,6 +94,7 @@ python tools/decode_texture_capture.py evidence/my-replay
 - `inspect_*runtime.py`、`inspect_command_list.py` 等：只读当前进程资料，输出留在本地。
 - `summarize_*.py`、`compare_capture_stages.py`：汇总保存的参数和采集日志。
 - `summarize_bridge.py`：汇总实际输入矩形、零/非零抖动、相邻历史连续性、顶点 UV 和恢复状态；不把参数/CPU 顶点观察解释为 SR 已可用。
+- `summarize_texture_graph.py`：根据保存的着色器哈希与同帧绑定/复制记录汇总颜色链、占位深度和模糊参数；未知着色器不推测角色。
 - `decode_texture_capture.py`、`analyze_low_roi.py`：分析自己的原始纹理；预览图是诊断可视化。
 - `analyze_jitter_coverage.py`：可用 `--high`、`--low` 指定参数记录，离线比对抖动样本。
 - `analyze_bridge_sites.py`：读取 `inspect_pe.py` 生成的证据 JSON；可用 `--evidence` 指定文件。

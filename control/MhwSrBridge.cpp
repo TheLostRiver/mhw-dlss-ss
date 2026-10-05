@@ -37,13 +37,14 @@ std::mutex g_logMutex, g_viewsMutex;
 std::ofstream g_log;
 std::map<std::tuple<unsigned, unsigned, unsigned>, uint64_t> g_views;
 struct Hook { void* address{}; std::array<unsigned char,16> patch{},original{}; bool enabled=false; };
-std::array<Hook,16> g_hooks{};
+std::array<Hook,32> g_hooks{};
 std::string g_expectedProxyHash;
 bool g_requireFrameGenOff=true;
 bool g_applyScalePulse=true;
 bool g_gameHooks=true;
 bool g_tracePostTaa=false;
 bool g_pulseJitter=false;
+bool g_traceTextures=false;
 std::atomic<bool> g_jitterChanged{false};
 bool EnableJitterPulse();
 bool JitterPulseStillOwned();
@@ -52,6 +53,7 @@ std::atomic<uint64_t> g_engineUpdates{0};
 void PrepareBridgeHooks();
 void PrepareSceneScopeHook();
 void PrepareEngineVertexHook();
+void PrepareEngineTextureHooks();
 void RecordBridgeViewport(ID3D12GraphicsCommandList*,UINT,const D3D12_VIEWPORT*);
 void FinishBridge();
 uint64_t g_phaseStart=0;
@@ -217,7 +219,8 @@ void PrepareGameHook() {
     if(status!=MH_OK)throw std::runtime_error("Quad hook creation failed");
     PrepareSceneScopeHook();
     if(g_tracePostTaa)PrepareEngineVertexHook();
-    Log(std::string("{\"event\":\"game_hooks_prepared\",\"version\":3,\"game_hook_count\":")+(g_tracePostTaa?"5":"4")+",\"hook_enabled\":false,\"changes_scale\":false}");
+    if(g_traceTextures)PrepareEngineTextureHooks();
+    Log(std::string("{\"event\":\"game_hooks_prepared\",\"version\":3,\"game_hook_count\":")+std::to_string(4+(g_tracePostTaa?1:0)+(g_traceTextures?4:0))+",\"hook_enabled\":false,\"changes_scale\":false}");
 }
 void Install() {
     const auto core=GetModuleHandleW(L"D3D12Core.dll");
@@ -273,12 +276,14 @@ void ReadBridgeConfiguration(const std::filesystem::path& ini) {
     g_gameHooks=GetPrivateProfileIntW(L"Experiment",L"GameHooks",1,ini.c_str())!=0;
     g_tracePostTaa=GetPrivateProfileIntW(L"Experiment",L"TracePostTaa",0,ini.c_str())!=0;
     g_pulseJitter=GetPrivateProfileIntW(L"Experiment",L"PulseJitter",0,ini.c_str())!=0;
+    g_traceTextures=GetPrivateProfileIntW(L"Experiment",L"TraceTextures",0,ini.c_str())!=0;
+    if(g_traceTextures&&(!g_gameHooks||!g_tracePostTaa))throw std::runtime_error("Texture tracing requires game and post-TAA hooks");
     if(!g_gameHooks)g_applyScalePulse=false;
     if(g_pulseJitter&&(!g_gameHooks||!g_applyScalePulse))throw std::runtime_error("Jitter diagnostic requires the bounded engine scale pulse");
     Log("{\"event\":\"bridge_configuration\",\"version\":3,\"expected_proxy_sha256\":\""+g_expectedProxyHash+
         "\",\"requires_framegen_off\":"+(g_requireFrameGenOff?"true":"false")+",\"applies_scale_pulse\":"+(g_applyScalePulse?"true":"false")+
         ",\"game_hooks\":"+(g_gameHooks?"true":"false")+",\"trace_post_taa\":"+(g_tracePostTaa?"true":"false")+
-        ",\"pulses_projection_jitter\":"+(g_pulseJitter?"true":"false")+"}");
+        ",\"pulses_projection_jitter\":"+(g_pulseJitter?"true":"false")+",\"traces_textures\":"+(g_traceTextures?"true":"false")+"}");
 }
 void Stop() noexcept {
     g_ready.store(false);bool restored=true;

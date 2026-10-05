@@ -9,12 +9,21 @@ unsigned char* g_mhwss{};
 mhwsr::Dispatch g_ngx{};
 std::mutex g_bridgeMutex;
 struct VertexCopyRange {UINT64 destination=0,source=0,bytes=0;};
+struct TextureHeap {UINT64 gpu=0,cpu=0;unsigned count=0,stride=0;};
+struct TextureRoots {uintptr_t signature=0;std::array<UINT64,32> tables{},cbvs{};};
+struct TextureList {TextureHeap heap{};TextureRoots compute{},graphics{};std::array<UINT64,8> targets{};unsigned targetCount=0;};
+struct PreparedDepthTrace {uintptr_t source=0,prepared=0;unsigned width=0,height=0,format=0;uint64_t generation=0,sequence=0;};
 struct ListTrace {
     ID3D12PipelineState* pso{};D3D12_VIEWPORT view{};bool hasView=false;uint64_t generation=0;
     std::array<UINT64,16> cbvs{};std::array<uint64_t,16> cbvEpochs{};uint64_t bindEpoch=0,lastTaaEpoch=0;
     D3D12_VERTEX_BUFFER_VIEW vertex{};uint64_t taaSerial=0;unsigned postTaaOps=0;mhwsr::Size taaInput{},taaOutput{};
     uintptr_t vertexCaller=0;
     std::array<VertexCopyRange,16> vertexCopies{};unsigned vertexCopyCount=0;
+    TextureList textures{};
+    uint64_t texturePassId=0;
+    unsigned postTaaDispatches=0;bool detailedTextureFrame=false;
+    D3D12_RECT scissor{};bool hasScissor=false;
+    PreparedDepthTrace preparedDepth{};
 };
 std::unordered_map<ID3D12GraphicsCommandList*,ListTrace> g_bridgeLists;
 struct TaaTrace {
@@ -104,6 +113,8 @@ void SaveBridge(const std::string& row) {
 #include "BridgeScreenInputs.inl"
 #include "BridgeVertexReader.inl"
 #include "BridgeEngineVertices.inl"
+#include "BridgeTextureBindings.inl"
+#include "BridgePreparedDepth.inl"
 #include "BridgePostTaaTrace.inl"
 void QueryBridgePlans(const TaaTrace& t) {
     if(!t.size[0]||!t.size[1]||t.size[0]>16384||t.size[1]>16384)return;
@@ -139,10 +150,10 @@ void RecordDispatchCandidate(const TaaTrace& t) {
 }
 bool __fastcall OnMhwPso(void* self,ID3D12GraphicsCommandList* list,ID3D12PipelineState* pso) {
     if(g_ready.load()&&!g_done.load())try {
-        ++g_psoCallbacks;
+        const auto pass=++g_psoCallbacks;
         if(NativeTaaPso(pso))++g_taaPsoBindings;
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
-        if(g_bridgeLists.size()<512||g_bridgeLists.count(list))g_bridgeLists[list].pso=pso;else ++g_traceDrops;
+        if(g_bridgeLists.size()<512||g_bridgeLists.count(list)){auto& state=g_bridgeLists[list];state.pso=pso;state.texturePassId=pass;}else ++g_traceDrops;
     }catch(...){++g_traceDrops;}
     return g_psoCallback(self,list,pso);
 }
@@ -174,11 +185,23 @@ bool __fastcall OnMhwDispatch(void* self,ID3D12GraphicsCommandList* list,UINT x,
         {
             std::lock_guard<std::mutex> lock(g_bridgeMutex);auto& state=g_bridgeLists[list];
             state.taaSerial=screen.error?0:trace.serial;state.postTaaOps=0;
+            state.postTaaDispatches=0;state.detailedTextureFrame=false;
             if(!screen.error){state.taaInput={screen.words[10],screen.words[11]};
-                state.taaOutput={static_cast<unsigned>(ScreenFloat(screen,16)),static_cast<unsigned>(ScreenFloat(screen,20))};}
+                state.taaOutput={static_cast<unsigned>(ScreenFloat(screen,16)),static_cast<unsigned>(ScreenFloat(screen,20))};
+                if(g_traceTextures){static std::map<std::pair<unsigned,unsigned>,unsigned> samples;const auto key=std::make_pair(screen.words[10],screen.words[11]);
+                    if(samples.size()<8||samples.count(key)){auto& count=samples[key];state.detailedTextureFrame=count<4;if(count<4)++count;}}}
         }
         RecordTaaScreen(trace,screen);
+        if(!screen.error)RecordPreparedDepth(list,trace.serial);
+        if(!screen.error)RecordTextureSnapshot(list,true,trace.serial,0,0);
         QueryBridgePlans(trace);
+    }catch(...){++g_traceDrops;}
+    if(!matched&&g_traceTextures&&g_ready.load()&&!g_done.load())try {
+        uint64_t serial=0;unsigned index=0;
+        {std::lock_guard<std::mutex> lock(g_bridgeMutex);const auto found=g_bridgeLists.find(list);
+            if(found!=g_bridgeLists.end()&&found->second.taaSerial&&found->second.postTaaOps<3&&found->second.postTaaDispatches<16){
+                serial=found->second.taaSerial;index=++found->second.postTaaDispatches;}}
+        if(serial)RecordTextureSnapshot(list,true,serial,index,0,"post_taa_dispatch",x,y,z);
     }catch(...){++g_traceDrops;}
     return result;
 }
@@ -252,6 +275,19 @@ void PrepareEngineVertexHook() {
     const std::array<unsigned char,16> signature{0x48,0x8b,0xc4,0x48,0x89,0x58,0x18,0x55,0x56,0x41,0x56,0x48,0x8b,0xec,0x48,0x83};
     BridgeHook(15,reinterpret_cast<unsigned char*>(g_game)+0x259e470,signature,reinterpret_cast<void*>(&OnEngineVertices),g_engineVertices);
 }
+void PrepareEngineTextureHooks() {
+    const std::array<unsigned char,16> bind{0x4c,0x8b,0xdc,0x4d,0x89,0x43,0x18,0x55,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41};
+    const std::array<unsigned char,16> targets{0x48,0x8b,0xc4,0x4c,0x89,0x48,0x20,0x48,0x89,0x50,0x10,0x55,0x53,0x57,0x41,0x55};
+    auto* game=reinterpret_cast<unsigned char*>(g_game);
+    BridgeHook(16,game+0x259f070,bind,reinterpret_cast<void*>(&OnEngineTextureBind0),g_engineTextureBind0);
+    BridgeHook(17,game+0x259f330,bind,reinterpret_cast<void*>(&OnEngineTextureBind1),g_engineTextureBind1);
+    BridgeHook(24,game+0x259f9b0,targets,reinterpret_cast<void*>(&OnEngineTargets),g_engineTargets);
+    const std::array<unsigned char,16> compute{0x4c,0x8b,0xdc,0x49,0x89,0x6b,0x20,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57};
+    BridgeHook(26,game+0x259f610,compute,reinterpret_cast<void*>(&OnEngineTextureComputeBind),g_engineTextureComputeBind);
+    const std::array<unsigned char,16> resourceGetter{0x48,0x89,0x5c,0x24,0x08,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0x59,0x60,0x48,0x8b};
+    if(memcmp(game+0x259ffb0,resourceGetter.data(),16))throw std::runtime_error("Texture resource getter signature differs");
+    g_textureAllocation=reinterpret_cast<TextureAllocation>(game+0x259ffb0);
+}
 bool KnownNgxPointer(void* pointer,bool allowProbe) {
     HMODULE module{};
     if(!pointer||!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,reinterpret_cast<LPCWSTR>(pointer),&module))return false;
@@ -312,13 +348,47 @@ void PrepareBridgeHooks() {
         BridgeHook(13,core+0x130c80,copy,reinterpret_cast<void*>(&OnBridgeBufferCopy),g_bufferCopy);
         const std::array<unsigned char,16> map{0x40,0x53,0x55,0x56,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0x80,0x00};
         BridgeHook(14,core+0x10d010,map,reinterpret_cast<void*>(&OnBridgeResourceMap),g_resourceMap);
+        if(g_traceTextures) {
+            auto* owner=reinterpret_cast<unsigned char*>(proxy);
+            const std::array<unsigned char,16> copyDescriptor{0x40,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0x6c};
+            const std::array<unsigned char,16> heaps{0x48,0x81,0xc1,0xe0,0xfe,0xff,0xff,0xe9,0x3c,0x75,0xff,0xff,0xcc,0xcc,0xcc,0xcc};
+            const std::array<unsigned char,16> table{0x48,0x89,0x5c,0x24,0x20,0x55,0x56,0x57,0x41,0x56,0x41,0x57,0x48,0x8d,0xac,0x24};
+            const std::array<unsigned char,16> csig{0x48,0x89,0x5c,0x24,0x18,0x48,0x89,0x74,0x24,0x20,0x57,0x48,0x83,0xec,0x60,0x48};
+            const std::array<unsigned char,16> gsig{0x48,0x89,0x5c,0x24,0x18,0x57,0x48,0x83,0xec,0x60,0x48,0x8b,0x05,0xbf,0x5e,0x7e};
+            const std::array<unsigned char,16> om{0x40,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0xac};
+            BridgeHook(18,owner+0x177470,copyDescriptor,reinterpret_cast<void*>(&OnTextureCopy),g_textureCopy);
+            BridgeHook(19,core+0x12ac90,heaps,reinterpret_cast<void*>(&OnTextureHeaps),g_textureHeaps);
+            BridgeHook(20,owner+0x1783b0,table,reinterpret_cast<void*>(&OnTextureComputeTable),g_textureComputeTable);
+            BridgeHook(21,owner+0x177730,table,reinterpret_cast<void*>(&OnTextureGraphicsTable),g_textureGraphicsTable);
+            BridgeHook(22,owner+0x61900,csig,reinterpret_cast<void*>(&OnTextureComputeSignature),g_textureComputeSignature);
+            BridgeHook(23,owner+0x62170,gsig,reinterpret_cast<void*>(&OnTextureGraphicsSignature),g_textureGraphicsSignature);
+            BridgeHook(25,owner+0x177ca0,om,reinterpret_cast<void*>(&OnTextureTargets),g_textureTargets);
+            const std::array<unsigned char,16> textureCopy{0x40,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0x6c};
+            const std::array<unsigned char,16> resourceCopy{0x48,0x89,0x5c,0x24,0x10,0x55,0x56,0x57,0x48,0x83,0xec,0x30,0x49,0x8b,0xf0,0x48};
+            BridgeHook(27,core+0x1308e0,textureCopy,reinterpret_cast<void*>(&OnTrackedTextureCopy),g_trackedTextureCopy);
+            BridgeHook(28,core+0x1306d0,resourceCopy,reinterpret_cast<void*>(&OnTrackedResourceCopy),g_trackedResourceCopy);
+            const std::array<unsigned char,16> scissor{0x48,0x83,0xec,0x28,0x4c,0x8b,0xd9,0x48,0x8b,0x41,0x58,0x4c,0x8b,0x15,0xfe,0xa1};
+            BridgeHook(29,core+0x12adf0,scissor,reinterpret_cast<void*>(&OnTextureScissor),g_textureScissor);
+            const std::array<unsigned char,16> graphicsCbv{0x48,0x83,0xec,0x28,0x4c,0x8b,0xd9,0x48,0x8b,0x41,0x58,0x4c,0x8b,0x15,0x9e,0xa7};
+            BridgeHook(30,core+0x12a850,graphicsCbv,reinterpret_cast<void*>(&OnTextureGraphicsCbv),g_textureGraphicsCbv);
+            const std::array<unsigned char,16> depthStage{0x48,0x89,0x5c,0x24,0x20,0x55,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57};
+            BridgeHook(31,g_mhwss+0x115940,depthStage,reinterpret_cast<void*>(&OnPreparedDepth),g_preparedDepthStage);
+        }
     }
     OpenScreenReader();
+    if(g_traceTextures) {
+        ID3D12Device* device=nullptr;
+        if(FAILED(g_screenArena->GetDevice(IID_PPV_ARGS(&device))))throw std::runtime_error("Texture trace device unavailable");
+        g_textureRtvStride=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);device->Release();
+        if(!g_textureRtvStride)throw std::runtime_error("RTV descriptor stride unavailable");
+    }
     Log("{\"event\":\"bridge_preflight_prepared\",\"version\":3,\"modifies_ngx_dispatch\":false,\"changes_copy\":false,\"queries_capabilities\":true,\"evaluates_sr\":false}");
 }
 void FinishBridge() {
     CloseScreenReader();
     CloseVertexReaders();
+    SaveTextureShaders();
+    size_t textureKinds=0;{std::lock_guard<std::mutex> lock(g_textureMutex);textureKinds=g_textureSnapshotKinds.size();}
     try {
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
         for(const auto& row:g_bridgeRecords)Log(row);
@@ -336,6 +406,10 @@ void FinishBridge() {
             ",\"buffer_copy_calls\":"+std::to_string(g_bufferCopyCalls.load())+",\"vertex_buffer_copies\":"+std::to_string(g_vertexBufferCopies.load())+
             ",\"resource_map_calls\":"+std::to_string(g_resourceMapCalls.load())+
             ",\"engine_vertex_candidates\":"+std::to_string(g_engineVertexCandidates.load())+",\"engine_vertex_references\":"+std::to_string(g_engineVertexReferences.load())+
+            ",\"texture_binder_calls\":"+std::to_string(g_textureBinderCalls.load())+",\"texture_packet_failures\":"+std::to_string(g_texturePacketFailures.load())+
+            ",\"confirmed_texture_copies\":"+std::to_string(g_confirmedTextureCopies.load())+",\"texture_snapshot_kinds\":"+std::to_string(textureKinds)+
+            ",\"post_taa_texture_copies\":"+std::to_string(g_postTaaTextureCopies.load())+
+            ",\"observed_depth_preparations\":"+std::to_string(g_depthPreparations.load())+",\"taa_with_same_generation_depth\":"+std::to_string(g_taaDepthMatches.load())+
             ",\"mhwss_handled_taa\":"+std::to_string(g_nativeBypasses.load())+",\"trace_drops\":"+std::to_string(g_traceDrops.load())+",\"evaluates_sr\":false}");
     }catch(...){}
 }
