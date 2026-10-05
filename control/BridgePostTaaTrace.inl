@@ -22,7 +22,7 @@ void RecordPostTaaQuadVertices(const ListTrace& state,UINT vertices,UINT instanc
 }
 
 void STDMETHODCALLTYPE OnBridgeVertices(ID3D12GraphicsCommandList* list,UINT start,UINT count,const D3D12_VERTEX_BUFFER_VIEW* views) {
-    if(g_ready.load()&&!g_done.load()&&start==0&&count)try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&start==0&&count)try {
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
         if(g_bridgeLists.size()<512||g_bridgeLists.count(list)){
             auto& state=g_bridgeLists[list];state.vertex=views?views[0]:D3D12_VERTEX_BUFFER_VIEW{};
@@ -96,6 +96,7 @@ void ObservePostTaaDraw(ID3D12GraphicsCommandList* list,UINT vertices,UINT insta
     out<<"],\"changes_draw\":false}";SaveBridge(out.str());
 }
 void STDMETHODCALLTYPE OnBridgeDraw(ID3D12GraphicsCommandList* list,UINT vertices,UINT instances,UINT firstVertex,UINT firstInstance) {
-    if(g_ready.load()&&!g_done.load())try{ObservePostTaaDraw(list,vertices,instances,firstVertex,firstInstance);}catch(...){++g_traceDrops;}
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load())try{ObservePostTaaDraw(list,vertices,instances,firstVertex,firstInstance);}catch(...){++g_traceDrops;}
+    if(g_qualityMode&&RunQualityDraw(list,vertices,instances,firstVertex,firstInstance))return;
     g_draw(list,vertices,instances,firstVertex,firstInstance);
 }

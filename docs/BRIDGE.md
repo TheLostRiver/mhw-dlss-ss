@@ -2,11 +2,11 @@
 
 核心源码：[`MhwSrBridge.cpp`](../control/MhwSrBridge.cpp)、[`BridgePreflight.inl`](../control/BridgePreflight.inl)、[`BridgeScreenInputs.inl`](../control/BridgeScreenInputs.inl)、[`BridgePostTaaTrace.inl`](../control/BridgePostTaaTrace.inl)、[`SrParameterAdapter.h`](../control/SrParameterAdapter.h)。
 
-**当前启动入口只做前置观察，不执行游戏内 SR。** 参数转换函数已编译为导出函数，但没有接入 MHWSS 的 Create/Evaluate 分发表。
+**默认启动入口仍做前置观察。** 新增的 `QualityPrototype=1` 会启用已编译但尚未经游戏内验证的 [质量档渲染原型](QUALITY-PROTOTYPE.md)。下文记录观察器的已取得证据；原型独立管理 SR 特征，复用原分发链，不改写 MHWSS 的 Create/Evaluate 函数槽。
 
 ## 原有渲染入口
 
-针对已记录的 MHWSS 1.0.2 构建，分析发现其上采样路径可将原生 TAA PSO 替换为旁路 PSO，在 TAA dispatch 后整理输入并调用上采样入口。目标是在这个替代路径中执行一次 SR，而不是在 SR 前后再叠加独立 DLAA。
+针对已记录的 MHWSS 1.0.2 构建，分析发现其上采样路径可将原生 TAA PSO 替换为旁路 PSO，在 TAA dispatch 后整理输入并调用上采样入口。新增原型在同一个 dispatch 回调处独立执行 SR，保持 MHWSS=None，成功后跳过原生 TAA；其实现与原有上采样器的模式管理分开。
 
 | MHWSS 接口 | RVA |
 |---|---|
@@ -90,7 +90,7 @@ UV 对应 `2 × (实际输入尺寸 - 0.5) / 输出尺寸`，目标视口为 256
 
 ## 仍需实现
 
-真正接通 SR 调用、在对应帧产出完整 SR 后调整后 TAA 取样、特征重建与释放、尺寸变化及场景切换恢复、投影/MV/历史一致性，以及档位 UI。
+游戏内验证新增原型的 SR 调用和完整后处理链；随后完善常驻特征重建、尺寸变化及场景切换恢复、投影/MV/历史一致性，以及档位 UI。已编译的调用代码不等于已经取得可用的游戏内结果。
 
 当前版本拒绝与部署配置不符的代理哈希。可在 `MhwSrBridge.ini` 的 `[Compatibility] NgxProxySha256` 指定经过部署检查的文件标识；只更新这项并不意味着已经验证代理最终传给 NVIDIA 的 SR 参数。版本 2 会将观察到的哈希和匹配结果写入日志。
 

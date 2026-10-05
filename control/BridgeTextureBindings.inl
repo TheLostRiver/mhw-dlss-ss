@@ -47,7 +47,7 @@ bool ReadShaderSlice(uintptr_t program,unsigned stage,const void** data,unsigned
 }
 void CaptureTextureShaders(const TexturePacket& packet) {
     std::lock_guard<std::mutex> lock(g_textureMutex);
-    if(!g_ready.load()||g_done.load())return;
+    if(!(g_ready.load()&&!g_qualityCommands)||g_done.load())return;
     for(unsigned stage=0;stage<3;++stage) {
         const auto key=std::make_pair(packet.pso,stage);
         if(g_textureShaders.count(key)||g_textureShaders.size()>=64)continue;
@@ -159,7 +159,7 @@ struct TexturePacketOwner {
 };
 uintptr_t ObserveEngineTextureBind(EngineTextureBind next,void* backend,void* request,void* result) {
     TexturePacketOwner scope;
-    if(g_ready.load()&&!g_done.load())try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load())try {
         auto* list=EngineTextureList(backend);
         if(list&&TexturePassRelevant(list)) {
             ++g_textureBinderCalls;scope.packet.list=list;
@@ -175,7 +175,7 @@ uintptr_t __fastcall OnEngineTextureBind1(void* a,void* b,void* c){return Observ
 uintptr_t __fastcall OnEngineTextureComputeBind(void* a,void* b,void* c){return ObserveEngineTextureBind(g_engineTextureComputeBind,a,b,c);}
 void STDMETHODCALLTYPE OnTextureCopy(ID3D12Device* device,UINT count,D3D12_CPU_DESCRIPTOR_HANDLE destination,D3D12_CPU_DESCRIPTOR_HANDLE source,D3D12_DESCRIPTOR_HEAP_TYPE type) {
     g_textureCopy(device,count,destination,source,type);
-    if(g_ready.load()&&!g_done.load()&&type==D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&type==D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)try {
         const auto stride=device->GetDescriptorHandleIncrementSize(type);
         std::lock_guard<std::mutex> lock(g_textureMutex);
         if(count>4096){g_textureDescriptors.clear();++g_traceDrops;return;}
@@ -193,7 +193,7 @@ void STDMETHODCALLTYPE OnTextureCopy(ID3D12Device* device,UINT count,D3D12_CPU_D
     }catch(...){++g_traceDrops;}
 }
 void STDMETHODCALLTYPE OnTextureHeaps(ID3D12GraphicsCommandList* list,UINT count,ID3D12DescriptorHeap* const* heaps) {
-    if(g_ready.load()&&!g_done.load()&&count<=2)try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&count<=2)try {
         TextureHeap info{};
         for(unsigned i=0;heaps&&i<count;++i)if(heaps[i]) {
             const auto d=heaps[i]->GetDesc();
@@ -207,12 +207,13 @@ void STDMETHODCALLTYPE OnTextureHeaps(ID3D12GraphicsCommandList* list,UINT count
             auto& t=g_bridgeLists[list].textures;
             if(t.heap.gpu!=info.gpu||t.heap.cpu!=info.cpu){t.compute.tables={};t.graphics.tables={};}
             t.heap=info;
+            t.heapCount=count;t.heaps={};for(unsigned i=0;heaps&&i<count;++i)t.heaps[i]=heaps[i];
         }
     }catch(...){++g_traceDrops;}
     g_textureHeaps(list,count,heaps);
 }
 void TrackTextureTable(ID3D12GraphicsCommandList* list,UINT root,UINT64 value,bool compute) {
-    if(!g_ready.load()||g_done.load()||root>=32)return;
+    if(!(g_ready.load()&&!g_qualityCommands)||g_done.load()||root>=32)return;
     std::lock_guard<std::mutex> lock(g_bridgeMutex);
     if(g_bridgeLists.size()<512||g_bridgeLists.count(list)) {
         auto& t=g_bridgeLists[list].textures;(compute?t.compute:t.graphics).tables[root]=value;
@@ -221,7 +222,7 @@ void TrackTextureTable(ID3D12GraphicsCommandList* list,UINT root,UINT64 value,bo
 void STDMETHODCALLTYPE OnTextureComputeTable(ID3D12GraphicsCommandList* l,UINT i,D3D12_GPU_DESCRIPTOR_HANDLE h){try{TrackTextureTable(l,i,h.ptr,true);}catch(...){++g_traceDrops;}g_textureComputeTable(l,i,h);}
 void STDMETHODCALLTYPE OnTextureGraphicsTable(ID3D12GraphicsCommandList* l,UINT i,D3D12_GPU_DESCRIPTOR_HANDLE h){try{TrackTextureTable(l,i,h.ptr,false);}catch(...){++g_traceDrops;}g_textureGraphicsTable(l,i,h);}
 void TrackTextureSignature(ID3D12GraphicsCommandList* list,ID3D12RootSignature* signature,bool compute) {
-    if(!g_ready.load()||g_done.load())return;
+    if(!(g_ready.load()&&!g_qualityCommands)||g_done.load())return;
     std::lock_guard<std::mutex> lock(g_bridgeMutex);
     if(g_bridgeLists.size()<512||g_bridgeLists.count(list)) {
         auto& t=g_bridgeLists[list].textures;auto& roots=compute?t.compute:t.graphics;
@@ -232,7 +233,7 @@ void TrackTextureSignature(ID3D12GraphicsCommandList* list,ID3D12RootSignature* 
 void STDMETHODCALLTYPE OnTextureComputeSignature(ID3D12GraphicsCommandList* l,ID3D12RootSignature* s){try{TrackTextureSignature(l,s,true);}catch(...){++g_traceDrops;}g_textureComputeSignature(l,s);}
 void STDMETHODCALLTYPE OnTextureGraphicsSignature(ID3D12GraphicsCommandList* l,ID3D12RootSignature* s){try{TrackTextureSignature(l,s,false);}catch(...){++g_traceDrops;}g_textureGraphicsSignature(l,s);}
 void STDMETHODCALLTYPE OnTextureGraphicsCbv(ID3D12GraphicsCommandList* list,UINT root,UINT64 address) {
-    if(g_ready.load()&&!g_done.load()&&root<32)try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&root<32)try {
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
         if(g_bridgeLists.size()<512||g_bridgeLists.count(list))g_bridgeLists[list].textures.graphics.cbvs[root]=address;
     }catch(...){++g_traceDrops;}
@@ -255,7 +256,7 @@ bool ReadEngineTargets(void* input,TexturePacket* out) noexcept {
 }
 uintptr_t __fastcall OnEngineTargets(void* a,void* b,void* c,void* d) {
     TexturePacketOwner owner;
-    if(g_ready.load()&&!g_done.load())try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load())try {
         const auto list=EngineTextureList(a);
         if(list&&TexturePassRelevant(list)&&ReadEngineTargets(c,&owner.packet)) {
             DescribeTexturePacket(owner.packet);std::lock_guard<std::mutex> lock(g_textureMutex);
@@ -265,7 +266,7 @@ uintptr_t __fastcall OnEngineTargets(void* a,void* b,void* c,void* d) {
     return g_engineTargets(a,b,c,d);
 }
 void STDMETHODCALLTYPE OnTextureTargets(ID3D12GraphicsCommandList* list,UINT count,const D3D12_CPU_DESCRIPTOR_HANDLE* handles,BOOL consecutive,const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
-    if(g_ready.load()&&!g_done.load()&&count<=8)try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&count<=8)try {
         std::array<UINT64,8> values{};
         if(handles)for(unsigned i=0;i<count;++i)values[i]=consecutive?handles[0].ptr+UINT64(i)*g_textureRtvStride:handles[i].ptr;
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
@@ -274,7 +275,7 @@ void STDMETHODCALLTYPE OnTextureTargets(ID3D12GraphicsCommandList* list,UINT cou
     g_textureTargets(list,count,handles,consecutive,depth);
 }
 void STDMETHODCALLTYPE OnTextureScissor(ID3D12GraphicsCommandList* list,UINT count,const D3D12_RECT* rects) {
-    if(g_ready.load()&&!g_done.load())try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load())try {
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
         if(g_bridgeLists.size()<512||g_bridgeLists.count(list)){auto& s=g_bridgeLists[list];s.hasScissor=count==1&&rects;if(s.hasScissor)s.scissor=rects[0];}
     }catch(...){++g_traceDrops;}
@@ -284,7 +285,7 @@ void WriteTextureIdentity(std::ostream& out,const TextureIdentity& t) {
     out<<"\"resource\":\"0x"<<std::hex<<t.resource<<std::dec<<"\",\"size\":["<<t.width<<','<<t.height<<"],\"format\":"<<t.format<<",\"flags\":"<<t.flags;
 }
 void RecordTextureSnapshot(ID3D12GraphicsCommandList* list,bool compute,uint64_t serial,unsigned drawIndex,unsigned vertices,const char* stage=nullptr,UINT x=0,UINT y=0,UINT z=0) {
-    if(!g_traceTextures||!g_ready.load()||g_done.load())return;
+    if(!g_traceTextures||!(g_ready.load()&&!g_qualityCommands)||g_done.load())return;
     ListTrace state{};
     {std::lock_guard<std::mutex> lock(g_bridgeMutex);const auto f=g_bridgeLists.find(list);if(f==g_bridgeLists.end())return;state=f->second;}
     const auto& heap=state.textures.heap;const auto& roots=compute?state.textures.compute:state.textures.graphics;
@@ -332,6 +333,6 @@ void RecordTextureSnapshot(ID3D12GraphicsCommandList* list,bool compute,uint64_t
         if(copied)for(unsigned i=0;i<words.size();++i){if(i)out<<',';out<<words[i];}out<<']';
     }
     out<<",\"dispatch\":["<<x<<','<<y<<','<<z<<"],\"detailed_frame\":"<<(state.detailedTextureFrame?"true":"false")
-        <<",\"pipeline_binding_serial\":"<<state.texturePassId<<",\"requires_same_pipeline_binding_copy\":true,\"changes_rendering\":false}";SaveBridge(out.str());
+        <<",\"pipeline_binding_serial\":"<<state.texturePassId<<",\"requires_same_pipeline_binding_copy\":true,\"original_game_bindings\":true}";SaveBridge(out.str());
 }
 #include "BridgeTextureCopies.inl"

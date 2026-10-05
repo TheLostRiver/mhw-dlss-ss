@@ -22,17 +22,19 @@ ID3D12Resource* ReferenceScreenArena() noexcept {
     __except(EXCEPTION_EXECUTE_HANDLER){return nullptr;}
 }
 void STDMETHODCALLTYPE OnBridgeComputeCbv(ID3D12GraphicsCommandList* list,UINT root,UINT64 address) {
-    if(g_ready.load()&&!g_done.load()&&root<16)try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&root<16)try {
         ++g_computeCbvCalls;std::lock_guard<std::mutex> lock(g_bridgeMutex);
         if(g_bridgeLists.size()<512||g_bridgeLists.count(list)) {
             auto& state=g_bridgeLists[list];state.cbvs[root]=address;state.cbvEpochs[root]=++state.bindEpoch;
+            state.textures.compute.cbvs[root]=address;
         }else ++g_traceDrops;
     }catch(...){++g_traceDrops;}
     g_computeCbv(list,root,address);
 }
 void STDMETHODCALLTYPE OnBridgeClearState(ID3D12GraphicsCommandList* list,ID3D12PipelineState* pso) {
+    if(g_qualityMode&&!g_qualityCommands)InvalidateQualityBindings(list);
     g_clearState(list,pso);
-    if(g_ready.load()&&!g_done.load())try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load())try {
         std::lock_guard<std::mutex> lock(g_bridgeMutex);const auto found=g_bridgeLists.find(list);
         if(found!=g_bridgeLists.end()){const auto generation=found->second.generation+1;found->second={};found->second.generation=generation;found->second.pso=pso;}
     }catch(...){++g_traceDrops;}

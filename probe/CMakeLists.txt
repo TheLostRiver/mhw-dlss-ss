@@ -98,13 +98,13 @@ target_compile_options(MhwQuadPilot PRIVATE /W4 /permissive- /guard:cf /utf-8)
 target_link_options(MhwQuadPilot PRIVATE /guard:cf /DYNAMICBASE /NXCOMPAT /MAP)
 target_link_libraries(MhwQuadPilot PRIVATE bcrypt minhook)
 
-add_library(MhwSrBridge SHARED ../control/MhwSrBridge.cpp ../control/SrParameterAdapter.cpp)
+add_library(MhwSrBridge SHARED ../control/MhwSrBridge.cpp ../control/SrParameterAdapter.cpp ../control/SrQualityGpu.cpp)
 target_compile_features(MhwSrBridge PRIVATE cxx_std_17)
 target_include_directories(MhwSrBridge PRIVATE "${MHW_SR_NGX_SDK_DIR}/include")
 target_compile_definitions(MhwSrBridge PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(MhwSrBridge PRIVATE /W4 /permissive- /guard:cf /utf-8)
 target_link_options(MhwSrBridge PRIVATE /guard:cf /DYNAMICBASE /NXCOMPAT /MAP)
-target_link_libraries(MhwSrBridge PRIVATE bcrypt minhook)
+target_link_libraries(MhwSrBridge PRIVATE bcrypt minhook d3d12 d3dcompiler)
 
 foreach(target MhwSrProbe MhwViewportProbe MhwTextureProbe MhwPassProbe MhwScreenProbe MhwScalePilot MhwQuadPilot MhwSrBridge)
   add_custom_command(TARGET ${target} POST_BUILD

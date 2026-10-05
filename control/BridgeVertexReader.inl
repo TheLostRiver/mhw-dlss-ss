@@ -23,7 +23,7 @@ thread_local bool g_insideVertexDiscovery=false;
 void ObserveVertexResource(ID3D12Resource* resource,UINT64 base,bool copySource=false) {
     std::lock_guard<std::mutex> lock(g_vertexReadMutex);
     // Recheck after locking: Stop may have started while this call was pending.
-    if(!g_ready.load()||g_done.load()||!base||g_vertexArenaCount>=g_vertexArenas.size())return;
+    if(!(g_ready.load()&&!g_qualityCommands)||g_done.load()||!base||g_vertexArenaCount>=g_vertexArenas.size())return;
     for(size_t i=0;i<g_vertexArenaCount;++i)if(g_vertexArenas[i].resource==resource)return;
     auto& seen=copySource?g_seenCopySources:g_seenAddressResources;
     if(seen.count(resource)||seen.size()>=1024)return;
@@ -53,7 +53,7 @@ void ObserveVertexResource(ID3D12Resource* resource,UINT64 base,bool copySource=
 }
 UINT64 STDMETHODCALLTYPE OnBridgeGpuAddress(ID3D12Resource* resource) {
     const auto base=g_gpuAddress(resource);
-    if(g_ready.load()&&!g_done.load()&&!g_insideVertexDiscovery) {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&!g_insideVertexDiscovery) {
         ++g_gpuAddressCalls;
         struct Guard {Guard(){g_insideVertexDiscovery=true;}~Guard(){g_insideVertexDiscovery=false;}} guard;
         try{ObserveVertexResource(resource,base);}catch(...){++g_traceDrops;}
@@ -62,7 +62,7 @@ UINT64 STDMETHODCALLTYPE OnBridgeGpuAddress(ID3D12Resource* resource) {
 }
 HRESULT STDMETHODCALLTYPE OnBridgeResourceMap(ID3D12Resource* resource,UINT subresource,const D3D12_RANGE* range,void** data) {
     const auto result=g_resourceMap(resource,subresource,range,data);
-    if(SUCCEEDED(result)&&g_ready.load()&&!g_done.load()&&!g_insideVertexDiscovery) {
+    if(SUCCEEDED(result)&&(g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&!g_insideVertexDiscovery) {
         ++g_resourceMapCalls;
         struct Guard {Guard(){g_insideVertexDiscovery=true;}~Guard(){g_insideVertexDiscovery=false;}} guard;
         try{ObserveVertexResource(resource,resource->GetGPUVirtualAddress());}catch(...){++g_traceDrops;}
@@ -71,7 +71,7 @@ HRESULT STDMETHODCALLTYPE OnBridgeResourceMap(ID3D12Resource* resource,UINT subr
 }
 void STDMETHODCALLTYPE OnBridgeBufferCopy(ID3D12GraphicsCommandList* list,ID3D12Resource* destination,UINT64 destinationOffset,
     ID3D12Resource* source,UINT64 sourceOffset,UINT64 bytes) {
-    if(g_ready.load()&&!g_done.load()&&!g_insideVertexDiscovery) {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&!g_insideVertexDiscovery) {
         ++g_bufferCopyCalls;
         struct Guard {Guard(){g_insideVertexDiscovery=true;}~Guard(){g_insideVertexDiscovery=false;}} guard;
         try {

@@ -31,7 +31,7 @@ bool ReferenceEngineVertex(void* backend,void* input,EngineVertexData* out) noex
     }__except(EXCEPTION_EXECUTE_HANDLER){return false;}
 }
 uintptr_t __fastcall OnEngineVertices(void* backend,void* state,void* input) {
-    if(g_ready.load()&&!g_done.load()) {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()) {
         EngineVertexData data{};
         if(ReferenceEngineVertex(backend,input,&data)) {
             ++g_engineVertexCandidates;

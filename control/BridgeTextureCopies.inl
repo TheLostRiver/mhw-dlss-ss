@@ -22,13 +22,14 @@ void RecordPostTaaCopy(ID3D12GraphicsCommandList* list,ID3D12Resource* destinati
     if(box)out<<'['<<box->left<<','<<box->top<<','<<box->front<<','<<box->right<<','<<box->bottom<<','<<box->back<<']';else out<<"null";
     if(dst&&src)out<<",\"copy_location_types\":["<<src->Type<<','<<dst->Type<<"],\"source_subresource\":"<<(src->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX?src->SubresourceIndex:UINT_MAX)
         <<",\"destination_subresource\":"<<(dst->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX?dst->SubresourceIndex:UINT_MAX);
-    out<<",\"detailed_frame\":"<<(state.detailedTextureFrame?"true":"false")<<",\"changes_copy\":false}";SaveBridge(out.str());
+    out<<",\"detailed_frame\":"<<(state.detailedTextureFrame?"true":"false")<<",\"original_call_arguments\":true}";SaveBridge(out.str());
 }
 void STDMETHODCALLTYPE OnTrackedTextureCopy(ID3D12GraphicsCommandList* list,const D3D12_TEXTURE_COPY_LOCATION* dst,UINT x,UINT y,UINT z,const D3D12_TEXTURE_COPY_LOCATION* src,const D3D12_BOX* box) {
-    if(g_ready.load()&&!g_done.load()&&dst&&src)try{RecordPostTaaCopy(list,dst->pResource,src->pResource,dst,src,x,y,z,box);}catch(...){++g_traceDrops;}
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&dst&&src)try{RecordPostTaaCopy(list,dst->pResource,src->pResource,dst,src,x,y,z,box);}catch(...){++g_traceDrops;}
+    if(g_qualityMode&&RunQualityCopy(list,dst,x,y,z,src,box))return;
     g_trackedTextureCopy(list,dst,x,y,z,src,box);
 }
 void STDMETHODCALLTYPE OnTrackedResourceCopy(ID3D12GraphicsCommandList* list,ID3D12Resource* dst,ID3D12Resource* src) {
-    if(g_ready.load()&&!g_done.load())try{RecordPostTaaCopy(list,dst,src,nullptr,nullptr,0,0,0,nullptr);}catch(...){++g_traceDrops;}
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load())try{RecordPostTaaCopy(list,dst,src,nullptr,nullptr,0,0,0,nullptr);}catch(...){++g_traceDrops;}
     g_trackedResourceCopy(list,dst,src);
 }

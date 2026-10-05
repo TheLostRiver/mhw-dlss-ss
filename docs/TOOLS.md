@@ -40,6 +40,8 @@ Enabled=1
 
 桥接前置采集可包含以下选项；`NgxProxySha256` 必须替换为已核对的实际代理 SHA-256，不能直接使用占位文字：
 
+以下是普通观察模式。需要实际执行 SR 的实验版本另见 [质量档原型说明](QUALITY-PROTOTYPE.md)，其配置模板、部署和失败边界不同，不能只把代理切成 DLSS 就视为已接通。
+
 ```ini
 [Experiment]
 Enabled=1

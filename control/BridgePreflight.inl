@@ -11,7 +11,9 @@ std::mutex g_bridgeMutex;
 struct VertexCopyRange {UINT64 destination=0,source=0,bytes=0;};
 struct TextureHeap {UINT64 gpu=0,cpu=0;unsigned count=0,stride=0;};
 struct TextureRoots {uintptr_t signature=0;std::array<UINT64,32> tables{},cbvs{};};
-struct TextureList {TextureHeap heap{};TextureRoots compute{},graphics{};std::array<UINT64,8> targets{};unsigned targetCount=0;};
+struct TextureList {TextureHeap heap{};TextureRoots compute{},graphics{};std::array<UINT64,8> targets{};unsigned targetCount=0;
+    std::array<ID3D12DescriptorHeap*,2> heaps{};unsigned heapCount=0;};
+struct QualityMark {uintptr_t color=0,taa=0,copy=0,tone=0;unsigned stage=0;bool sr=false;};
 struct PreparedDepthTrace {uintptr_t source=0,prepared=0;unsigned width=0,height=0,format=0;uint64_t generation=0,sequence=0;};
 struct ListTrace {
     ID3D12PipelineState* pso{};D3D12_VIEWPORT view{};bool hasView=false;uint64_t generation=0;
@@ -24,6 +26,8 @@ struct ListTrace {
     unsigned postTaaDispatches=0;bool detailedTextureFrame=false;
     D3D12_RECT scissor{};bool hasScissor=false;
     PreparedDepthTrace preparedDepth{};
+    QualityMark quality{};
+    D3D_PRIMITIVE_TOPOLOGY topology=D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 };
 std::unordered_map<ID3D12GraphicsCommandList*,ListTrace> g_bridgeLists;
 struct TaaTrace {
@@ -55,7 +59,7 @@ uintptr_t __fastcall OnScenePass(void* context,void* scene,unsigned flags,uintpt
         ~RestoreScope(){g_sceneInvocation=invocation;g_threadTaa=taa;}
     } restore{g_sceneInvocation,g_threadTaa};
     g_sceneInvocation={};g_threadTaa={};
-    if(g_ready.load()&&!g_done.load()) {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()) {
         SceneInvocation candidate{};
         if(ReadSceneInvocation(context,scene,&candidate)&&std::isfinite(candidate.scale)&&candidate.scale>=0.5f&&candidate.scale<=1.0f) {
             // Match 0x23c38a8..0x23c3908: single-precision multiply followed
@@ -76,7 +80,7 @@ bool ReadActualSceneRect(void* context,const int* rect,SceneInvocation* scope) n
 }
 uintptr_t __fastcall OnSceneViewport(void* context,const int* rect) {
     const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress())-reinterpret_cast<uintptr_t>(g_game);
-    if(g_ready.load()&&!g_done.load()&&caller==0x23c391f&&g_sceneInvocation.serial&&
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&caller==0x23c391f&&g_sceneInvocation.serial&&
        g_sceneInvocation.context==reinterpret_cast<uintptr_t>(context)&&ReadActualSceneRect(context,rect,&g_sceneInvocation)) {
         const auto& d=g_sceneInvocation;
         g_sceneInvocation.inputObserved=d.inputRect[0]==0&&d.inputRect[1]==0&&d.outputRect[0]==0&&d.outputRect[1]==0&&
@@ -110,12 +114,20 @@ void SaveBridge(const std::string& row) {
     std::lock_guard<std::mutex> lock(g_bridgeMutex);
     if(g_bridgeRecords.size()<768)g_bridgeRecords.push_back(row);else ++g_traceDrops;
 }
+void InvalidateQualityBindings(ID3D12GraphicsCommandList*);
 #include "BridgeScreenInputs.inl"
+bool RunQualityTaa(ID3D12GraphicsCommandList*,const TaaScreenInput&);
+bool RunQualityDraw(ID3D12GraphicsCommandList*,UINT,UINT,UINT,UINT);
+bool RunQualityCopy(ID3D12GraphicsCommandList*,const D3D12_TEXTURE_COPY_LOCATION*,UINT,UINT,UINT,const D3D12_TEXTURE_COPY_LOCATION*,const D3D12_BOX*);
+void ResetQualityList(ID3D12GraphicsCommandList*);
 #include "BridgeVertexReader.inl"
 #include "BridgeEngineVertices.inl"
 #include "BridgeTextureBindings.inl"
 #include "BridgePreparedDepth.inl"
 #include "BridgePostTaaTrace.inl"
+template<class Fn> void BridgeHook(size_t,void*,const std::array<unsigned char,16>&,void*,Fn&);
+bool KnownNgxPointer(void*,bool);
+#include "BridgeQuality.inl"
 void QueryBridgePlans(const TaaTrace& t) {
     if(!t.size[0]||!t.size[1]||t.size[0]>16384||t.size[1]>16384)return;
     if(g_queried.exchange(true))return;
@@ -149,7 +161,7 @@ void RecordDispatchCandidate(const TaaTrace& t) {
     SaveBridge(out.str());
 }
 bool __fastcall OnMhwPso(void* self,ID3D12GraphicsCommandList* list,ID3D12PipelineState* pso) {
-    if(g_ready.load()&&!g_done.load())try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load())try {
         const auto pass=++g_psoCallbacks;
         if(NativeTaaPso(pso))++g_taaPsoBindings;
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
@@ -159,7 +171,7 @@ bool __fastcall OnMhwPso(void* self,ID3D12GraphicsCommandList* list,ID3D12Pipeli
 }
 bool __fastcall OnMhwDispatch(void* self,ID3D12GraphicsCommandList* list,UINT x,UINT y,UINT z) {
     TaaTrace trace{};bool matched=false;
-    if(g_ready.load()&&!g_done.load())try {
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load())try {
         ++g_dispatchCallbacks;
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
         const auto found=g_bridgeLists.find(list);
@@ -172,16 +184,18 @@ bool __fastcall OnMhwDispatch(void* self,ID3D12GraphicsCommandList* list,UINT x,
     }catch(...){++g_traceDrops;}
     TaaScreenInput screen{};
     if(matched)screen=ReadTaaScreen(list);
-    const auto result=g_dispatchCallback(self,list,x,y,z);
-    if(g_ready.load()&&!g_done.load()&&g_sceneInvocation.serial&&g_sceneInvocation.inputObserved)try {
-        trace.groups[0]=x;trace.groups[1]=y;trace.groups[2]=z;trace.handled=result;trace.sceneInvocation=g_sceneInvocation.serial;
+    const bool quality=matched&&g_qualityMode&&RunQualityTaa(list,screen);
+    const auto mhwssResult=g_dispatchCallback(self,list,x,y,z);
+    const bool result=mhwssResult||quality;
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&g_sceneInvocation.serial&&g_sceneInvocation.inputObserved)try {
+        trace.groups[0]=x;trace.groups[1]=y;trace.groups[2]=z;trace.handled=mhwssResult;trace.sceneInvocation=g_sceneInvocation.serial;
         MainState(&trace);QueryBridgePlans(trace);RecordDispatchCandidate(trace);
     }catch(...){++g_traceDrops;}
     if(matched)try {
-        trace.groups[0]=x;trace.groups[1]=y;trace.groups[2]=z;trace.handled=result;
+        trace.groups[0]=x;trace.groups[1]=y;trace.groups[2]=z;trace.handled=mhwssResult;
         trace.serial=++g_taaDispatches;trace.tick=GetTickCount64();trace.engineUpdate=g_engineUpdates.load();
         trace.sceneInvocation=g_sceneInvocation.serial;
-        MainState(&trace);g_threadTaa=trace;if(result)++g_nativeBypasses;
+        MainState(&trace);g_threadTaa=trace;if(mhwssResult)++g_nativeBypasses;
         {
             std::lock_guard<std::mutex> lock(g_bridgeMutex);auto& state=g_bridgeLists[list];
             state.taaSerial=screen.error?0:trace.serial;state.postTaaOps=0;
@@ -196,7 +210,7 @@ bool __fastcall OnMhwDispatch(void* self,ID3D12GraphicsCommandList* list,UINT x,
         if(!screen.error)RecordTextureSnapshot(list,true,trace.serial,0,0);
         QueryBridgePlans(trace);
     }catch(...){++g_traceDrops;}
-    if(!matched&&g_traceTextures&&g_ready.load()&&!g_done.load())try {
+    if(!matched&&g_traceTextures&&(g_ready.load()&&!g_qualityCommands)&&!g_done.load())try {
         uint64_t serial=0;unsigned index=0;
         {std::lock_guard<std::mutex> lock(g_bridgeMutex);const auto found=g_bridgeLists.find(list);
             if(found!=g_bridgeLists.end()&&found->second.taaSerial&&found->second.postTaaOps<3&&found->second.postTaaDispatches<16){
@@ -207,7 +221,8 @@ bool __fastcall OnMhwDispatch(void* self,ID3D12GraphicsCommandList* list,UINT x,
 }
 HRESULT STDMETHODCALLTYPE OnBridgeReset(ID3D12GraphicsCommandList* list,ID3D12CommandAllocator* allocator,ID3D12PipelineState* pso) {
     const auto result=g_listReset(list,allocator,pso);
-    if(SUCCEEDED(result)&&g_ready.load()&&!g_done.load())try {
+    if(SUCCEEDED(result)&&g_qualityMode&&!g_qualityCommands)ResetQualityList(list);
+    if(SUCCEEDED(result)&&(g_ready.load()&&!g_qualityCommands)&&!g_done.load())try {
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
         const auto found=g_bridgeLists.find(list);
         if(found!=g_bridgeLists.end()){const auto generation=found->second.generation+1;found->second={};found->second.generation=generation;found->second.pso=pso;}
@@ -216,10 +231,10 @@ HRESULT STDMETHODCALLTYPE OnBridgeReset(ID3D12GraphicsCommandList* list,ID3D12Co
     return result;
 }
 void RecordBridgeViewport(ID3D12GraphicsCommandList* list,UINT count,const D3D12_VIEWPORT* view) {
-    if(!g_ready.load()||g_done.load()||count!=1||!view)return;
+    if(!(g_ready.load()&&!g_qualityCommands)||g_done.load())return;
     try {
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
-        if(g_bridgeLists.size()<512||g_bridgeLists.count(list)){auto& trace=g_bridgeLists[list];trace.view=view[0];trace.hasView=true;}
+        if(g_bridgeLists.size()<512||g_bridgeLists.count(list)){auto& trace=g_bridgeLists[list];trace.hasView=count==1&&view;if(trace.hasView)trace.view=view[0];}
     }catch(...){++g_traceDrops;}
 }
 void RecordBridgeQuad(uintptr_t caller,void* context,const QuadData& d) {
@@ -410,6 +425,7 @@ void FinishBridge() {
             ",\"confirmed_texture_copies\":"+std::to_string(g_confirmedTextureCopies.load())+",\"texture_snapshot_kinds\":"+std::to_string(textureKinds)+
             ",\"post_taa_texture_copies\":"+std::to_string(g_postTaaTextureCopies.load())+
             ",\"observed_depth_preparations\":"+std::to_string(g_depthPreparations.load())+",\"taa_with_same_generation_depth\":"+std::to_string(g_taaDepthMatches.load())+
-            ",\"mhwss_handled_taa\":"+std::to_string(g_nativeBypasses.load())+",\"trace_drops\":"+std::to_string(g_traceDrops.load())+",\"evaluates_sr\":false}");
+            ",\"mhwss_handled_taa\":"+std::to_string(g_nativeBypasses.load())+",\"trace_drops\":"+std::to_string(g_traceDrops.load())+
+            ",\"quality_evaluations\":"+std::to_string(g_qualityEvaluated.load())+"}");
     }catch(...){}
 }

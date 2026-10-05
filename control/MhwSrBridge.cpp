@@ -1,5 +1,4 @@
-// Bridge preflight: associate MHWSS native TAA callbacks with the measured game copy.
-// This build queries NGX settings but does not create or evaluate a DLSS feature.
+// Bridge observer plus an opt-in, bounded Quality rendering prototype.
 // Reserves disabled game hooks during startup; waits for an explicit scene signal.
 #include "../readback/CaptureCommon.h"
 #include <d3d12.h>
@@ -7,6 +6,7 @@
 #include <atomic>
 #include <cmath>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <tuple>
@@ -14,6 +14,7 @@
 #include <intrin.h>
 #include <unordered_map>
 #include "SrParameterAdapter.h"
+#include "SrQualityGpu.h"
 
 namespace {
 constexpr char kGameHash[] = "c2ebbbd2c49f216d484e31a5219bed419eb1e5e7d206d02cba040a3ab79d90ea";
@@ -37,7 +38,12 @@ std::mutex g_logMutex, g_viewsMutex;
 std::ofstream g_log;
 std::map<std::tuple<unsigned, unsigned, unsigned>, uint64_t> g_views;
 struct Hook { void* address{}; std::array<unsigned char,16> patch{},original{}; bool enabled=false; };
-std::array<Hook,32> g_hooks{};
+std::array<Hook,35> g_hooks{};
+bool g_qualityMode=false;
+thread_local unsigned g_qualityCommands=0;
+bool QualityScale(float&);
+void PrepareQualityHooks();
+void FinishQuality();
 std::string g_expectedProxyHash;
 bool g_requireFrameGenOff=true;
 bool g_applyScalePulse=true;
@@ -92,7 +98,7 @@ void Restore(void* object,const char* reason) {
 }
 void __fastcall OnUpdate(void* object) {
     g_update(object);
-    if(!g_ready.load()||g_done.load()||object!=Renderer()) return;
+    if(!(g_ready.load()&&!g_qualityCommands)||g_done.load()||object!=Renderer()) return;
     ++g_engineUpdates;
     try {
         const auto now=GetTickCount64();auto phase=g_phase.load();
@@ -115,9 +121,10 @@ void __fastcall OnUpdate(void* object) {
                 Log("{\"event\":\"baseline_changed_no_override\"}");g_done.store(true);return;
             }
             if(!g_applyScalePulse){g_restoreExpected=g_original;g_phase.store(3);g_phaseStart=now;Snapshot("scale_pulse_skipped",object);return;}
+            float requested=2.0f/3.0f;
+            if(g_qualityMode&&!QualityScale(requested))return;
             if(!EnableJitterPulse()){Log("{\"event\":\"jitter_pulse_refused\",\"changes_scale\":false}");g_done.store(true);return;}
-            // Diagnostic ratio, not an NGX mode or an SR integration. Preserve engine alignment.
-            g_setter(object,2.0f/3.0f,true);
+            g_setter(object,requested,true);
             g_expected=Value(object,0x1f0);g_changed.store(true);g_phase.store(2);g_phaseStart=now;
             Snapshot("target_requested",object);return;
         }
@@ -139,7 +146,7 @@ void __fastcall OnUpdate(void* object) {
 void STDMETHODCALLTYPE OnViewports(ID3D12GraphicsCommandList* list,UINT count,const D3D12_VIEWPORT* views) {
     RecordBridgeViewport(list,count,views);
     const auto phase=g_phase.load();
-    if(g_ready.load()&&!g_done.load()&&phase>=1&&phase<=3&&count==1&&views&&
+    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&phase>=1&&phase<=3&&count==1&&views&&
        std::isfinite(views[0].Width)&&std::isfinite(views[0].Height)&&views[0].Width>=320&&views[0].Height>=180&&
        views[0].Width<=16384&&views[0].Height<=16384) try {
         std::unique_lock<std::mutex> lock(g_viewsMutex,std::try_to_lock);
@@ -166,7 +173,7 @@ uintptr_t __fastcall OnQuad(void* renderer,void* context,const int* rect,const i
     const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
     const auto callerRva=caller-reinterpret_cast<uintptr_t>(g_game);
     const auto phase=g_phase.load();
-    const bool active=g_ready.load()&&!g_done.load()&&phase>=1&&phase<=3;
+    const bool active=(g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&phase>=1&&phase<=3;
     if(active)g_quadCalls.fetch_add(1,std::memory_order_relaxed);
     if(active&&(callerRva==0x23c6fee||callerRva==0x23c7b08))try {
         g_focusedQuadCalls.fetch_add(1,std::memory_order_relaxed);
@@ -231,6 +238,7 @@ void Install() {
     g_hooks[1].address=api+0x12ae40;
     g_hooks[1].original=viewport;
     PrepareBridgeHooks();
+    if(g_qualityMode)PrepareQualityHooks();
     for(const auto& hook:g_hooks)if(hook.address&&memcmp(hook.address,hook.original.data(),16))throw std::runtime_error("Hook target changed while waiting");
     const auto status=MH_CreateHook(g_hooks[1].address,reinterpret_cast<void*>(&OnViewports),reinterpret_cast<void**>(&g_viewports));
     if(status!=MH_OK)throw std::runtime_error("Viewport hook creation failed");
@@ -239,8 +247,8 @@ void Install() {
         if(MH_EnableHook(hook.address)!=MH_OK)throw std::runtime_error("Hook enable failed");
         hook.enabled=true;memcpy(hook.patch.data(),hook.address,16);
     }
-    Log(std::string("{\"event\":\"attached\",\"version\":3,\"bridge_mode\":\"preflight_only\",\"calls_engine_scale_setter\":")+
-        (g_gameHooks&&g_applyScalePulse?"true":"false")+",\"queries_ngx_capabilities\":true,\"evaluates_sr\":false}");
+    Log(std::string("{\"event\":\"attached\",\"version\":4,\"bridge_mode\":\"")+(g_qualityMode?"quality_prototype":"preflight_only")+"\",\"calls_engine_scale_setter\":"+
+        (g_gameHooks&&g_applyScalePulse?"true":"false")+",\"queries_ngx_capabilities\":true,\"sr_execution_enabled\":"+(g_qualityMode?"true":"false")+"}");
     if(!g_gameHooks)g_phase.store(1);
     g_ready.store(true);
 }
@@ -263,6 +271,12 @@ bool FrameGenDisabled(const std::filesystem::path& path) {
     GetPrivateProfileStringW(L"FrameGen",L"Enabled",L"auto",value.data(),static_cast<DWORD>(value.size()),path.c_str());
     return _wcsicmp(value.data(),L"false")==0||_wcsicmp(value.data(),L"off")==0||!wcscmp(value.data(),L"0");
 }
+bool QualityConfiguration(const std::filesystem::path& graphics,const std::filesystem::path& optiscaler) {
+    return !g_qualityMode||(Setting(graphics,"MotionBlur")=="Off"&&Setting(graphics,"Anti-Aliasing")=="TAA"&&
+        Setting(graphics,"NVIDIA DLSS")=="Off"&&Setting(optiscaler,"Dx12Upscaler")=="dlss"&&
+        Setting(optiscaler,"ColorResourceBarrier")=="auto"&&Setting(optiscaler,"MotionVectorResourceBarrier")=="auto"&&
+        Setting(optiscaler,"DepthResourceBarrier")=="auto"&&Setting(optiscaler,"OutputResourceBarrier")=="auto");
+}
 void ReadBridgeConfiguration(const std::filesystem::path& ini) {
     std::array<wchar_t,128> value{};
     GetPrivateProfileStringW(L"Compatibility",L"NgxProxySha256",L"73cf97e5c1a3db2be778df25d21b2999e664a06c6e0f64e67741987a21228a24",
@@ -277,6 +291,9 @@ void ReadBridgeConfiguration(const std::filesystem::path& ini) {
     g_tracePostTaa=GetPrivateProfileIntW(L"Experiment",L"TracePostTaa",0,ini.c_str())!=0;
     g_pulseJitter=GetPrivateProfileIntW(L"Experiment",L"PulseJitter",0,ini.c_str())!=0;
     g_traceTextures=GetPrivateProfileIntW(L"Experiment",L"TraceTextures",0,ini.c_str())!=0;
+    g_qualityMode=GetPrivateProfileIntW(L"Experiment",L"QualityPrototype",0,ini.c_str())==1;
+    if(g_qualityMode&&(!g_traceTextures||!g_tracePostTaa||!g_gameHooks||!g_applyScalePulse||!g_pulseJitter||!g_requireFrameGenOff))
+        throw std::runtime_error("Quality prototype requires all input/graph guards, jitter, scale pulse and FrameGen-off");
     if(g_traceTextures&&(!g_gameHooks||!g_tracePostTaa))throw std::runtime_error("Texture tracing requires game and post-TAA hooks");
     if(!g_gameHooks)g_applyScalePulse=false;
     if(g_pulseJitter&&(!g_gameHooks||!g_applyScalePulse))throw std::runtime_error("Jitter diagnostic requires the bounded engine scale pulse");
@@ -287,6 +304,7 @@ void ReadBridgeConfiguration(const std::filesystem::path& ini) {
 }
 void Stop() noexcept {
     g_ready.store(false);bool restored=true;
+    if(g_qualityMode)try{FinishQuality();}catch(...){Log("{\"event\":\"quality_cleanup_retained\",\"reason\":\"cleanup_exception\"}");}
     RestoreJitterPulse();
     for(auto& hook:g_hooks)if(hook.enabled){
         if(memcmp(hook.address,hook.patch.data(),16)||MH_DisableHook(hook.address)!=MH_OK)restored=false;
@@ -335,7 +353,7 @@ DWORD WINAPI Worker(void*) {
         while(true) {
             const auto now=GetTickCount64();
             const bool allowed=Setting(graphics,"ResolutionScaling")=="High"&&Setting(graphics,"DirectX12Enable")=="On"&&
-                Setting(mhwss,"Upscaler")=="None"&&FrameGenDisabled(optiscaler);
+                Setting(mhwss,"Upscaler")=="None"&&FrameGenDisabled(optiscaler)&&QualityConfiguration(graphics,optiscaler);
             if(!allowed)stableSince=0;else if(!stableSince)stableSince=now;
             if(stableSince&&now-stableSince>=5000)break;
             if(WaitForSingleObject(controls[0],0)==WAIT_OBJECT_0||GetPrivateProfileIntW(L"Experiment",L"Enabled",0,ini.c_str())!=1)throw std::runtime_error("Cancelled before change");
@@ -346,7 +364,7 @@ DWORD WINAPI Worker(void*) {
             Sleep(100);
             if(WaitForSingleObject(controls[0],0)==WAIT_OBJECT_0)g_abort.store(true);
             if(Setting(graphics,"ResolutionScaling")!="High"||Setting(graphics,"DirectX12Enable")!="On"||
-               Setting(mhwss,"Upscaler")!="None"||!FrameGenDisabled(optiscaler)||
+               Setting(mhwss,"Upscaler")!="None"||!FrameGenDisabled(optiscaler)||!QualityConfiguration(graphics,optiscaler)||
                GetPrivateProfileIntW(L"Experiment",L"Enabled",0,ini.c_str())!=1)g_abort.store(true);
             if(!g_gameHooks&&(g_abort.load()||GetTickCount64()-started>=5000)) {
                 Log("{\"event\":\"input_capture_complete\",\"changes_scale\":false}");g_done.store(true);break;

@@ -14,7 +14,7 @@ ID3D12Resource* ReferencePreparedDepth(void* context) noexcept {
 }
 void __fastcall OnPreparedDepth(void* context,ID3D12GraphicsCommandList* list,ID3D12Resource* source,unsigned sourceState) {
     g_preparedDepthStage(context,list,source,sourceState);
-    if(!g_ready.load()||g_done.load()||!source)return;
+    if(!(g_ready.load()&&!g_qualityCommands)||g_done.load()||!source)return;
     auto* prepared=ReferencePreparedDepth(context);if(!prepared)return;
     try {
         const auto a=source->GetDesc(),b=prepared->GetDesc();
