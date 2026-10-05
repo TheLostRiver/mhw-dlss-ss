@@ -21,8 +21,13 @@ matched=[r for r in target if r.get('input_rect_observed_at_engine_call') and
 groups=Counter((r.get('phase'),tuple(r.get('source_rect',[])),tuple(r.get('texture_size',[])),tuple(r.get('dispatch',[]))) for r in pairs)
 complete=events('sequence_complete')
 stopped=events('stopped')
-restored=bool(complete and stopped and stopped[-1].get('owned_hooks_restored') and
-    not stopped[-1].get('scale_override_pending') and abs(complete[-1].get('active',0)-1)<1e-5)
+input_only=events('input_capture_complete')
+restored=bool(stopped and stopped[-1].get('owned_hooks_restored') and not stopped[-1].get('scale_override_pending') and
+    ((complete and abs(complete[-1].get('active',0)-1)<1e-5) or input_only))
+inputs=events('taa_screen_input')
+valid_inputs=[r for r in inputs if r.get('error')==0]
+input_groups=Counter((tuple(r.get('output',[])),tuple(r.get('active_input',[])),r.get('actual_scale')) for r in valid_inputs)
+errors=Counter(r.get('error') for r in inputs if r.get('error'))
 summary={
     'source':str(args.capture),'sha256':hashlib.sha256(data).hexdigest(),
     'versions':sorted({r['version'] for r in rows if 'version' in r}),
@@ -36,6 +41,12 @@ summary={
     'target_nonmatching_pair_records':len(target)-len(matched),
     'cpu_scene_association_observed':bool(matched),'completed_and_restored':restored,
     'stopped':stopped,'in_game_sr_executed':False,'fps_measured':False,
+    'taa_input_records':len(inputs),'valid_taa_input_records':len(valid_inputs),
+    'taa_input_errors':dict(errors),
+    'taa_input_dimensions':[{'output':list(output),'active_input':list(active),'actual_scale':scale,'records':n}
+        for (output,active,scale),n in sorted(input_groups.items())],
+    'camera_records':sum(bool(r.get('camera_valid')) for r in inputs),
+    'input_only_completion':input_only,
     'limits':['Same CPU invocation and rectangle do not prove GPU resource identity or temporal correctness.',
               'No NGX feature creation/evaluation or copy-rectangle modification occurs in this preflight build.'],
 }

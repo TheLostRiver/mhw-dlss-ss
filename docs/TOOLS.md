@@ -44,12 +44,18 @@ Enabled=1
 [Experiment]
 Enabled=1
 RequireFrameGenOff=1
+ApplyScalePulse=1
+GameHooks=1
 
 [Compatibility]
 NgxProxySha256=<已核对的64位十六进制SHA256>
 ```
 
 默认要求现有 `OptiScaler.ini` 的 `[FrameGen] Enabled=false`。如果采集期间图像质量、MHWSS 选项或这项帧生成配置发生变化，观察器请求恢复内部比例。
+
+研究 TAA 输入时，必须确认**游戏内**原生抗锯齿已设为 TAA；磁盘配置不一定反映尚未保存的运行设置。MHWSS 的 Upscaler 仍可保持 None，不需要启用 DLAA。
+
+只读输入窗口使用 `GameHooks=0`，此时不设置内部比例。相机记录和附加常量读取属于 v3 的新增采集内容，不能把已完成的高档尺寸验证扩大解释为低档或完整时域验证。
 
 进入可移动场景后，在 PowerShell 使用实际 PID：
 

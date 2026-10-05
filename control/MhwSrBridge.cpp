@@ -37,9 +37,11 @@ std::mutex g_logMutex, g_viewsMutex;
 std::ofstream g_log;
 std::map<std::tuple<unsigned, unsigned, unsigned>, uint64_t> g_views;
 struct Hook { void* address{}; std::array<unsigned char,16> patch{},original{}; bool enabled=false; };
-std::array<Hook,8> g_hooks{};
+std::array<Hook,10> g_hooks{};
 std::string g_expectedProxyHash;
 bool g_requireFrameGenOff=true;
+bool g_applyScalePulse=true;
+bool g_gameHooks=true;
 std::atomic<uint64_t> g_engineUpdates{0};
 void PrepareBridgeHooks();
 void PrepareSceneScopeHook();
@@ -102,6 +104,7 @@ void __fastcall OnUpdate(void* object) {
             if(!Near(Value(object,0x1f0),g_original)||!Near(Value(object,0x204),1)) {
                 Log("{\"event\":\"baseline_changed_no_override\"}");g_done.store(true);return;
             }
+            if(!g_applyScalePulse){g_restoreExpected=g_original;g_phase.store(3);g_phaseStart=now;Snapshot("scale_pulse_skipped",object);return;}
             // Diagnostic ratio, not an NGX mode or an SR integration. Preserve engine alignment.
             g_setter(object,2.0f/3.0f,true);
             g_expected=Value(object,0x1f0);g_changed.store(true);g_phase.store(2);g_phaseStart=now;
@@ -203,7 +206,7 @@ void PrepareGameHook() {
     Log(std::string("{\"event\":\"hook_created\",\"target\":\"quad\",\"status\":\"")+MH_StatusToString(status)+"\"}");
     if(status!=MH_OK)throw std::runtime_error("Quad hook creation failed");
     PrepareSceneScopeHook();
-    Log("{\"event\":\"game_hooks_prepared\",\"version\":2,\"game_hook_count\":4,\"hook_enabled\":false,\"changes_scale\":false}");
+    Log("{\"event\":\"game_hooks_prepared\",\"version\":3,\"game_hook_count\":4,\"hook_enabled\":false,\"changes_scale\":false}");
 }
 void Install() {
     const auto core=GetModuleHandleW(L"D3D12Core.dll");
@@ -214,14 +217,17 @@ void Install() {
     g_hooks[1].address=api+0x12ae40;
     g_hooks[1].original=viewport;
     PrepareBridgeHooks();
-    for(const auto& hook:g_hooks)if(memcmp(hook.address,hook.original.data(),16))throw std::runtime_error("Hook target changed while waiting");
+    for(const auto& hook:g_hooks)if(hook.address&&memcmp(hook.address,hook.original.data(),16))throw std::runtime_error("Hook target changed while waiting");
     const auto status=MH_CreateHook(g_hooks[1].address,reinterpret_cast<void*>(&OnViewports),reinterpret_cast<void**>(&g_viewports));
     if(status!=MH_OK)throw std::runtime_error("Viewport hook creation failed");
     for(auto& hook:g_hooks) {
+        if(!hook.address)continue;
         if(MH_EnableHook(hook.address)!=MH_OK)throw std::runtime_error("Hook enable failed");
         hook.enabled=true;memcpy(hook.patch.data(),hook.address,16);
     }
-    Log("{\"event\":\"attached\",\"version\":2,\"observes_quads\":true,\"bridge_mode\":\"preflight_only\",\"calls_engine_scale_setter\":true,\"queries_ngx_capabilities\":true,\"evaluates_sr\":false,\"target_ratio\":0.666666667,\"target_window_ms\":3000}");
+    Log(std::string("{\"event\":\"attached\",\"version\":3,\"bridge_mode\":\"preflight_only\",\"calls_engine_scale_setter\":")+
+        (g_gameHooks&&g_applyScalePulse?"true":"false")+",\"queries_ngx_capabilities\":true,\"evaluates_sr\":false}");
+    if(!g_gameHooks)g_phase.store(1);
     g_ready.store(true);
 }
 std::string Setting(const std::filesystem::path& path,const std::string& key) {
@@ -252,8 +258,12 @@ void ReadBridgeConfiguration(const std::filesystem::path& ini) {
     for(auto c:raw){if(c>=L'A'&&c<=L'F')c+=L'a'-L'A';if(!((c>=L'0'&&c<=L'9')||(c>=L'a'&&c<=L'f')))
         throw std::runtime_error("Expected proxy SHA256 contains a non-hex character");g_expectedProxyHash.push_back(static_cast<char>(c));}
     g_requireFrameGenOff=GetPrivateProfileIntW(L"Experiment",L"RequireFrameGenOff",1,ini.c_str())!=0;
-    Log("{\"event\":\"bridge_configuration\",\"version\":2,\"expected_proxy_sha256\":\""+g_expectedProxyHash+
-        "\",\"requires_framegen_off\":"+(g_requireFrameGenOff?"true":"false")+"}");
+    g_applyScalePulse=GetPrivateProfileIntW(L"Experiment",L"ApplyScalePulse",1,ini.c_str())!=0;
+    g_gameHooks=GetPrivateProfileIntW(L"Experiment",L"GameHooks",1,ini.c_str())!=0;
+    if(!g_gameHooks)g_applyScalePulse=false;
+    Log("{\"event\":\"bridge_configuration\",\"version\":3,\"expected_proxy_sha256\":\""+g_expectedProxyHash+
+        "\",\"requires_framegen_off\":"+(g_requireFrameGenOff?"true":"false")+",\"applies_scale_pulse\":"+(g_applyScalePulse?"true":"false")+
+        ",\"game_hooks\":"+(g_gameHooks?"true":"false")+"}");
 }
 void Stop() noexcept {
     g_ready.store(false);bool restored=true;
@@ -280,12 +290,17 @@ DWORD WINAPI Worker(void*) {
         if(GetPrivateProfileIntW(L"Experiment",L"Enabled",0,ini.c_str())!=1)return 0;
         g_log.open(folder/(L"MhwSrBridge-"+std::to_wstring(GetCurrentProcessId())+L".jsonl"),std::ios::app);
         ReadBridgeConfiguration(ini);
-        PrepareGameHook();
+        if(g_gameHooks)PrepareGameHook();
+        else {
+            g_game=GetModuleHandleW(nullptr);
+            if(FileSha256(ModulePath(g_game))!=kGameHash||!Pin(g_self)||!Pin(g_game)||MH_Initialize()!=MH_OK)
+                throw std::runtime_error("Input-only observer initialization failed");
+        }
         const auto prefix=L"Local\\MhwSrBridge."+std::to_wstring(GetCurrentProcessId());
         controls[0]=CreateEventW(nullptr,TRUE,FALSE,(prefix+L".Cancel").c_str());
         controls[1]=CreateEventW(nullptr,FALSE,FALSE,(prefix+L".Start").c_str());
         if(!controls[0]||!controls[1])throw std::runtime_error("Control events unavailable");
-        Log("{\"event\":\"waiting_for_scene_signal\",\"version\":2,\"changes_scale\":false}");
+        Log("{\"event\":\"waiting_for_scene_signal\",\"version\":3,\"changes_scale\":false}");
         while(true) {
             const auto wait=WaitForMultipleObjects(2,controls,FALSE,250);
             if(wait==WAIT_OBJECT_0+1)break;
@@ -294,7 +309,7 @@ DWORD WINAPI Worker(void*) {
         const auto graphics=executable.parent_path()/L"graphics_option.ini",mhwss=executable.parent_path()/L"MHWSS"/L"MHWSS_config.toml",
             optiscaler=executable.parent_path()/L"OptiScaler.ini";
         uint64_t stableSince=0;
-        Log("{\"event\":\"waiting_for_configuration\",\"version\":2,\"requires\":\"High, DX12, MHWSS None, configured FrameGen constraint, stable 5 seconds\",\"writes_while_waiting\":false}");
+        Log("{\"event\":\"waiting_for_configuration\",\"version\":3,\"requires\":\"High, DX12, MHWSS None, configured FrameGen constraint, stable 5 seconds\",\"writes_while_waiting\":false}");
         while(true) {
             const auto now=GetTickCount64();
             const bool allowed=Setting(graphics,"ResolutionScaling")=="High"&&Setting(graphics,"DirectX12Enable")=="On"&&
@@ -311,6 +326,9 @@ DWORD WINAPI Worker(void*) {
             if(Setting(graphics,"ResolutionScaling")!="High"||Setting(graphics,"DirectX12Enable")!="On"||
                Setting(mhwss,"Upscaler")!="None"||!FrameGenDisabled(optiscaler)||
                GetPrivateProfileIntW(L"Experiment",L"Enabled",0,ini.c_str())!=1)g_abort.store(true);
+            if(!g_gameHooks&&(g_abort.load()||GetTickCount64()-started>=5000)) {
+                Log("{\"event\":\"input_capture_complete\",\"changes_scale\":false}");g_done.store(true);break;
+            }
             if(GetTickCount64()-started>20000) {
                 g_abort.store(true);
                 if(!g_changed.load()&&g_phase.load()<2)break;

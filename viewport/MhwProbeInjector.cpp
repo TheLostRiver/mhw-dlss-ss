@@ -45,7 +45,10 @@ int wmain(int argc, wchar_t** argv) {
          _wcsicmp(observerName.c_str(), L"MhwScreenProbe.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwScreenProbe_v2.dll") != 0 &&
          _wcsicmp(observerName.c_str(), L"MhwScreenProbe_v3.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwScreenProbe_v4.dll") != 0 &&
          _wcsicmp(observerName.c_str(), L"MhwScalePilot.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwScalePilot_v2.dll") != 0 &&
-         _wcsicmp(observerName.c_str(), L"MhwScalePilot_v3.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwQuadPilot.dll") != 0)) {
+         _wcsicmp(observerName.c_str(), L"MhwScalePilot_v3.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwQuadPilot.dll") != 0 &&
+         _wcsicmp(observerName.c_str(), L"MhwSrBridge.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwSrBridge_r1.dll") != 0 &&
+         _wcsicmp(observerName.c_str(), L"MhwSrBridge_r2.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwSrBridge_r3.dll") != 0 &&
+         _wcsicmp(observerName.c_str(), L"MhwSrBridge_inputs.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwSrBridge_inputs_v2.dll") != 0)) {
         std::wcerr << L"Only explicitly named research observer DLLs are accepted.\n"; return 2;
     }
     Handle process(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE |
