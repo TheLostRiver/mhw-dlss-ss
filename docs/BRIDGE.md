@@ -2,11 +2,11 @@
 
 核心源码：[`MhwSrBridge.cpp`](../control/MhwSrBridge.cpp)、[`BridgePreflight.inl`](../control/BridgePreflight.inl)、[`BridgeScreenInputs.inl`](../control/BridgeScreenInputs.inl)、[`BridgePostTaaTrace.inl`](../control/BridgePostTaaTrace.inl)、[`SrParameterAdapter.h`](../control/SrParameterAdapter.h)。
 
-**默认启动入口仍做前置观察。** 新增的 `QualityPrototype=1` 会启用已编译但尚未经游戏内验证的 [质量档渲染原型](QUALITY-PROTOTYPE.md)。下文记录观察器的已取得证据；原型独立管理 SR 特征，复用原分发链，不改写 MHWSS 的 Create/Evaluate 函数槽。
+**默认启动入口仍做前置观察。** `QualityPrototype=1` 启用 [质量档渲染原型](QUALITY-PROTOTYPE.md)，已完成首轮 269 次游戏内 SR 调用及输出链，画面与性能尚待验证。下文记录观察器证据；原型独立管理 SR 特征，复用原分发链，不改写 MHWSS 的 Create/Evaluate 函数槽。
 
 ## 原有渲染入口
 
-针对已记录的 MHWSS 1.0.2 构建，分析发现其上采样路径可将原生 TAA PSO 替换为旁路 PSO，在 TAA dispatch 后整理输入并调用上采样入口。新增原型在同一个 dispatch 回调处独立执行 SR，保持 MHWSS=None，成功后跳过原生 TAA；其实现与原有上采样器的模式管理分开。
+针对已记录的 MHWSS 1.0.2 构建，分析发现其上采样路径可将原生 TAA PSO 替换为旁路 PSO，在 TAA dispatch 后整理输入并调用上采样入口。当前原型在 TAA 处记录原始颜色和抖动，在随后的原生模糊入口获取实际深度/MV 并执行 SR，保持 MHWSS=None。原生 TAA 暂作回退，其结果不作为 SR 颜色输入。
 
 | MHWSS 接口 | RVA |
 |---|---|

@@ -99,4 +99,6 @@ void STDMETHODCALLTYPE OnBridgeDraw(ID3D12GraphicsCommandList* list,UINT vertice
     if((g_ready.load()&&!g_qualityCommands)&&!g_done.load())try{ObservePostTaaDraw(list,vertices,instances,firstVertex,firstInstance);}catch(...){++g_traceDrops;}
     if(g_qualityMode&&RunQualityDraw(list,vertices,instances,firstVertex,firstInstance))return;
     g_draw(list,vertices,instances,firstVertex,firstInstance);
+    if(g_qualityMode&&vertices&&instances)RecordQualitySceneDepth(list);
+    if(g_qualityMode)RecordQualityDepthDraw(list,vertices,instances,firstVertex,firstInstance);
 }

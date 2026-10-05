@@ -2,7 +2,7 @@
 
 为《怪物猎人：世界 / Monster Hunter: World》研究现代 **DLSS Super Resolution（超分辨率）** 接入。
 
-**当前包含研究工具和已编译、尚未在游戏中验证的质量档渲染原型。尚无经验证可用的游戏内 DLSS SR、帧率提升数据或档位 UI。** 请不要把编译产物当成即装即用的超分模组。
+**质量档原型已在游戏内完成首轮 SR 执行：269 次成功调用及对应完整输出路径。画面、时域和性能仍待验证，尚无常驻版本或档位 UI。** 请不要把编译产物当成即装即用的超分模组。
 
 目标是在保持游戏输出分辨率不变的情况下，让引擎按所选 DLSS 档位真正减少内部渲染像素，再用颜色、深度、运动矢量和抖动信息重建完整输出。目标包含质量、平衡、性能、超高性能档；最终不叠加单独的 DLAA pass，也不包含帧生成、Neural Rendering 或 Ray Reconstruction。
 
@@ -24,7 +24,7 @@
 | 后处理 GPU 取样 | 直接读取真实顶点缓冲区，324 次全屏三角形 UV 均匹配低分辨率区域到完整输出 | 尚未改为完整 SR 输出的取样 |
 | 实际颜色链 | 已逐帧对应 TAA 输出、局部复制、动态模糊重建、色调映射和最终放大，并取得对应着色器哈希 | 全尺寸 SR 输出需要同步处理复制区域、后处理视口/裁剪和 UV，不能只改最后一次取样 |
 | 深度来源 | 原生 TAA 的 t2 是 1×1 占位；已找到 MHWSS 的独立 R32 深度准备路径，269 次 TAA 与本命令列表记录周期中的深度准备对应 | 尚未用连续帧 SR 验证其像素内容、同步及遮挡解除 |
-| 质量档渲染原型 | 已编译逐帧输入关联、独立 SR 特征、MV 解码、完整输出写回、模糊绕过、调色及最终取样修正；保留 MHWSS=None | 尚未游戏内执行；仍为约 3 秒实验窗口，需检查真实后端、画面、时域及释放 |
+| 质量档渲染原型 | DLSS 310.9.1 / Quality=2，1696×954→2560×1440；269 次 SR 成功及对应模糊绕过、完整调色和最终复制；已恢复并经 fence 释放 | 约 3 秒窗口，画面反馈与性能仍待验证；原生 TAA 暂作回退，不作为 SR 输入 |
 | 档位和 UI | 已有尺寸查询、范围检查及质量模式参数适配代码 | 档位切换和 UI 尚未接通；超高性能还受引擎 0.5 比例下限限制 |
 
 上述尺寸是研究过程中使用的实例；设计应从运行时输出目标取尺寸，不绑定 2K、4K 或桌面分辨率。详细数据、接口位置和限制见 [研究记录](docs/RESEARCH.md)、[桥接设计](docs/BRIDGE.md) 和 [真实纹理链](docs/TEXTURE-GRAPH.md)。
@@ -87,8 +87,8 @@ python -m venv .venv
 
 ## 后续工作
 
-1. 在游戏中验证质量档原型的真实 NVIDIA 后端、逐帧输入和完整后处理链。
-2. 检查 SR 写回、模糊绕过、色调映射及最终取样的实际画面。
+1. 检查首轮质量档 SR 的完整画面、抖动/MV 时域表现及遮挡变化。
+2. 删除多余回退计算和诊断开销，再比较 GPU 帧时间。
 3. 验证 GPU 完成后的释放，并扩展到常驻运行、尺寸变化和场景切换恢复。
 4. 验证运动矢量、投影抖动、遮挡变化与连续帧画质，再测量 GPU 帧时间。
 5. 接通质量／平衡／性能档位和 UI；另行解决超高性能所需的引擎比例下限。
@@ -101,4 +101,4 @@ python -m venv .venv
 
 ---
 
-Experimental research for modern DLSS Super Resolution in Monster Hunter: World. **Not a working in-game SR mod yet.** The standalone replay, engine render-scale experiment, and post-TAA sampling observations are separate results; they do not establish in-game temporal quality or FPS gains.
+Experimental research for modern DLSS Super Resolution in Monster Hunter: World. The first bounded in-game Quality run completed 269 successful SR calls and matching output passes. **Visual quality, temporal correctness and FPS gains remain unverified; this is not a ready-to-use mod.**

@@ -28,6 +28,7 @@ TextureSignature g_textureComputeSignature{},g_textureGraphicsSignature{};
 std::mutex g_textureMutex;
 std::unordered_map<UINT64,TextureCopySource> g_textureDescriptors;
 std::unordered_map<UINT64,TextureIdentity> g_textureRtvs;
+std::unordered_map<UINT64,TextureIdentity> g_textureDsvs;
 std::set<std::string> g_textureSnapshotKinds;
 std::set<std::tuple<uintptr_t,unsigned,unsigned>> g_unresolvedTextureKinds;
 std::atomic<uint64_t> g_textureBinderCalls{0},g_texturePacketFailures{0},g_confirmedTextureCopies{0};
@@ -85,7 +86,7 @@ ID3D12GraphicsCommandList* EngineTextureList(void* backend) noexcept {
 }
 bool TexturePassRelevant(ID3D12GraphicsCommandList* list) {
     std::lock_guard<std::mutex> lock(g_bridgeMutex);const auto found=g_bridgeLists.find(list);
-    return found!=g_bridgeLists.end()&&(NativeTaaPso(found->second.pso)||(found->second.taaSerial&&found->second.postTaaOps<3));
+    return found!=g_bridgeLists.end()&&(NativeTaaPso(found->second.pso)||found->second.qualityDepthRenderPending||(found->second.taaSerial&&found->second.postTaaOps<3));
 }
 bool ReferenceTexture(ID3D12Resource* resource,TextureCopySource* out) noexcept {
     __try {
@@ -251,6 +252,21 @@ bool ReadEngineTargets(void* input,TexturePacket* out) noexcept {
             if(!handle||!ReferenceTexture(*reinterpret_cast<ID3D12Resource**>(view+0x18),&e))continue;
             e.source=handle;e.slot=i;++out->count;
         }
+        // Candidate DSV slot is separately confirmed against the actual API DSV
+        // handle. Never invoke an unknown COM pointer: require the depth identity
+        // already observed as the source of a main-depth copy.
+        if(g_qualityMode&&g_qualityRasterDepthAnchor.load()) {
+            auto* wrapper=*reinterpret_cast<unsigned char**>(p+0x40);
+            auto* view=wrapper?*reinterpret_cast<unsigned char**>(wrapper+0x60):nullptr;
+            if(view) {
+                const auto handle=*reinterpret_cast<UINT64*>(view+0x10);
+                auto* resource=*reinterpret_cast<ID3D12Resource**>(view+0x18);
+                if(handle&&reinterpret_cast<uintptr_t>(resource)==g_qualityRasterDepthAnchor.load()) {
+                    auto& e=out->entries[out->count];
+                    if(ReferenceTexture(resource,&e)){e.source=handle;e.kind=4;++out->count;}
+                }
+            }
+        }
         return true;
     }__except(EXCEPTION_EXECUTE_HANDLER){return false;}
 }
@@ -260,17 +276,21 @@ uintptr_t __fastcall OnEngineTargets(void* a,void* b,void* c,void* d) {
         const auto list=EngineTextureList(a);
         if(list&&TexturePassRelevant(list)&&ReadEngineTargets(c,&owner.packet)) {
             DescribeTexturePacket(owner.packet);std::lock_guard<std::mutex> lock(g_textureMutex);
-            for(unsigned i=0;i<owner.packet.count;++i){const auto& e=owner.packet.entries[i];if(e.texture.resource&&g_textureRtvs.size()<4096)g_textureRtvs[e.source]=e.texture;}
+            for(unsigned i=0;i<owner.packet.count;++i){const auto& e=owner.packet.entries[i];
+                auto& views=e.kind==4?g_textureDsvs:g_textureRtvs;if(e.texture.resource&&views.size()<4096)views[e.source]=e.texture;}
         }
     }catch(...){++g_traceDrops;}
     return g_engineTargets(a,b,c,d);
 }
 void STDMETHODCALLTYPE OnTextureTargets(ID3D12GraphicsCommandList* list,UINT count,const D3D12_CPU_DESCRIPTOR_HANDLE* handles,BOOL consecutive,const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
+    if(g_qualityMode)CaptureQualitySceneDepth(list,count,handles,consecutive);
     if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&count<=8)try {
         std::array<UINT64,8> values{};
         if(handles)for(unsigned i=0;i<count;++i)values[i]=consecutive?handles[0].ptr+UINT64(i)*g_textureRtvStride:handles[i].ptr;
+        uintptr_t depthResource=0;
+        if(depth){std::lock_guard<std::mutex> lock(g_textureMutex);const auto f=g_textureDsvs.find(depth->ptr);if(f!=g_textureDsvs.end())depthResource=f->second.resource;}
         std::lock_guard<std::mutex> lock(g_bridgeMutex);
-        if(g_bridgeLists.size()<512||g_bridgeLists.count(list)){auto& t=g_bridgeLists[list].textures;t.targets=values;t.targetCount=count;}
+        if(g_bridgeLists.size()<512||g_bridgeLists.count(list)){auto& t=g_bridgeLists[list].textures;t.targets=values;t.targetCount=count;t.depthResource=depthResource;t.depthHandle=depth?depth->ptr:0;}
     }catch(...){++g_traceDrops;}
     g_textureTargets(list,count,handles,consecutive,depth);
 }

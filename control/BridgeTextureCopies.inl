@@ -28,8 +28,10 @@ void STDMETHODCALLTYPE OnTrackedTextureCopy(ID3D12GraphicsCommandList* list,cons
     if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&dst&&src)try{RecordPostTaaCopy(list,dst->pResource,src->pResource,dst,src,x,y,z,box);}catch(...){++g_traceDrops;}
     if(g_qualityMode&&RunQualityCopy(list,dst,x,y,z,src,box))return;
     g_trackedTextureCopy(list,dst,x,y,z,src,box);
+    if(g_qualityMode&&dst&&src)RecordQualityDepthCopy(list,dst->pResource,src->pResource,dst,src,x,y,z,box);
 }
 void STDMETHODCALLTYPE OnTrackedResourceCopy(ID3D12GraphicsCommandList* list,ID3D12Resource* dst,ID3D12Resource* src) {
     if((g_ready.load()&&!g_qualityCommands)&&!g_done.load())try{RecordPostTaaCopy(list,dst,src,nullptr,nullptr,0,0,0,nullptr);}catch(...){++g_traceDrops;}
     g_trackedResourceCopy(list,dst,src);
+    if(g_qualityMode)RecordQualityDepthCopy(list,dst,src,nullptr,nullptr,0,0,0,nullptr);
 }

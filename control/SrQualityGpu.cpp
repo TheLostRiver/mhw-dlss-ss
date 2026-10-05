@@ -25,10 +25,10 @@ void Transition(ID3D12GraphicsCommandList* l,ID3D12Resource* r,D3D12_RESOURCE_ST
     D3D12_RESOURCE_BARRIER barrier{};barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition={r,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,a,b};l->ResourceBarrier(1,&barrier);
 }
-bool Texture(ID3D12Device* device,Size s,DXGI_FORMAT format,ID3D12Resource** output) {
+bool Texture(ID3D12Device* device,Size s,DXGI_FORMAT format,ID3D12Resource** output,D3D12_RESOURCE_FLAGS flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) {
     D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=s.width;d.Height=s.height;
-    d.DepthOrArraySize=1;d.MipLevels=1;d.Format=format;d.SampleDesc.Count=1;d.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    d.DepthOrArraySize=1;d.MipLevels=1;d.Format=format;d.SampleDesc.Count=1;d.Flags=flags;
     return SUCCEEDED(device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&d,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(output)));
 }
 bool FrameTexture(ID3D12Resource* r,Size s,DXGI_FORMAT format) {
@@ -41,13 +41,15 @@ QualityGpu::~QualityGpu() {
     // The bridge deliberately retains the entire session on uncertain GPU work.
     // Destruction is allowed only before recording or after ReleaseAfterGpu.
     if(!referenced_&&params_&&api_.destroy)api_.destroy(params_);
+    if(nativeConstantsMapped_)nativeConstants_->Unmap(0,nullptr);
 }
 bool QualityGpu::Prepare(const Dispatch& api,const Plan& plan,ID3D12Device* device,ID3D12Resource* packed) {
     if(device_||!api.create||!api.evaluate||!api.allocate||!api.destroy||!api.release||!device||
        !QualityPlanValid(plan)||!FrameTexture(packed,plan.output,DXGI_FORMAT_R32_UINT))return false;
     api_=api;plan_=plan;device_=device;packed_=packed;
-    if(!Texture(device,plan.output,DXGI_FORMAT_R16G16_FLOAT,&motion_)||
-       !Texture(device,plan.output,DXGI_FORMAT_R11G11B10_FLOAT,&output_)||
+    const auto preparationFlags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS|D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    if(!Texture(device,plan.output,DXGI_FORMAT_R16G16_FLOAT,&motion_,preparationFlags)||
+       !Texture(device,plan.output,DXGI_FORMAT_R11G11B10_FLOAT,&output_)||!Texture(device,plan.output,DXGI_FORMAT_R32_FLOAT,&depth_,preparationFlags)||
        FAILED(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence_))))return false;
     D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=2;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if(FAILED(device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&heap_))))return false;
@@ -94,17 +96,97 @@ NVSDK_NGX_Result QualityGpu::Prime(ID3D12GraphicsCommandList* list) {
     const auto result=api_.create(list,NVSDK_NGX_Feature_SuperSampling,params_,&feature_);
     return Ok(result)&&!feature_?NVSDK_NGX_Result_FAIL_FeatureNotFound:result;
 }
+bool QualityGpu::PrepareNativeInputs(ID3D12RootSignature* root) {
+    if(nativePreparePso_)return nativeRoot_.Get()==root;
+    if(!device_||!root)return false;
+    constexpr char source[]=R"(
+cbuffer Frame : register(b0) { float2 currentJitter; float2 previousJitter; };
+Texture2D<float> sceneDepth : register(t1);
+Texture2D<uint> packedMotion : register(t2);
+float4 vertex(uint id : SV_VertexID) : SV_POSITION {
+    float2 p=float2((id<<1)&2,id&2);
+    return float4(p*float2(2,-2)+float2(-1,1),0,1);
+}
+struct Result {float2 motion : SV_Target0; float depth : SV_Target1;};
+Result pixel(float4 position : SV_POSITION) {
+    uint2 p=uint2(position.xy); uint w,h; packedMotion.GetDimensions(w,h);
+    uint v=packedMotion.Load(int3(p,0));
+    Result r;
+    r.motion=(float2(f16tof32(v>>16),f16tof32(v&0xfffeu))+currentJitter-previousJitter)*float2(w,h);
+    r.depth=sceneDepth.Load(int3(p,0)); return r;
+})";
+    ComPtr<ID3DBlob> vs,ps,error;
+    if(FAILED(D3DCompile(source,sizeof(source)-1,"MhwSrNativeInputs",nullptr,nullptr,"vertex","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&vs,&error))||
+       FAILED(D3DCompile(source,sizeof(source)-1,"MhwSrNativeInputs",nullptr,nullptr,"pixel","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&ps,&error)))return false;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};d.pRootSignature=root;d.VS={vs->GetBufferPointer(),vs->GetBufferSize()};d.PS={ps->GetBufferPointer(),ps->GetBufferSize()};
+    d.SampleMask=UINT_MAX;d.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;d.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;d.RasterizerState.DepthClipEnable=TRUE;
+    d.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_ALWAYS;d.DepthStencilState.StencilReadMask=d.DepthStencilState.StencilWriteMask=255;
+    d.DepthStencilState.FrontFace={D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_COMPARISON_FUNC_ALWAYS};d.DepthStencilState.BackFace=d.DepthStencilState.FrontFace;
+    for(auto& blend:d.BlendState.RenderTarget){blend.SrcBlend=blend.SrcBlendAlpha=D3D12_BLEND_ONE;blend.DestBlend=blend.DestBlendAlpha=D3D12_BLEND_ZERO;
+        blend.BlendOp=blend.BlendOpAlpha=D3D12_BLEND_OP_ADD;blend.LogicOp=D3D12_LOGIC_OP_NOOP;blend.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;}
+    d.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;d.NumRenderTargets=2;
+    d.RTVFormats[0]=DXGI_FORMAT_R16G16_FLOAT;d.RTVFormats[1]=DXGI_FORMAT_R32_FLOAT;d.SampleDesc.Count=1;
+    if(FAILED(device_->CreateGraphicsPipelineState(&d,IID_PPV_ARGS(&nativePreparePso_))))return false;
+    D3D12_DESCRIPTOR_HEAP_DESC h{};h.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;h.NumDescriptors=2;
+    if(FAILED(device_->CreateDescriptorHeap(&h,IID_PPV_ARGS(&nativeRtvs_)))){nativePreparePso_.Reset();return false;}
+    nativeRtvStride_=device_->GetDescriptorHandleIncrementSize(h.Type);
+    auto at=nativeRtvs_->GetCPUDescriptorHandleForHeapStart();device_->CreateRenderTargetView(motion_.Get(),nullptr,at);at.ptr+=nativeRtvStride_;
+    device_->CreateRenderTargetView(depth_.Get(),nullptr,at);
+    D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=4096*256;buffer.Height=1;
+    buffer.DepthOrArraySize=1;buffer.MipLevels=1;buffer.SampleDesc.Count=1;buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if(FAILED(device_->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&nativeConstants_))))return false;
+    D3D12_RANGE noRead{0,0};void* mapped=nullptr;
+    if(FAILED(nativeConstants_->Map(0,&noRead,&mapped))||!mapped)return false;
+    nativeConstantsMapped_=static_cast<unsigned char*>(mapped);nativeRoot_=root;return true;
+}
+bool QualityGpu::RecordNativeInputs(ID3D12GraphicsCommandList* list,ID3D12RootSignature* root,const QualityFrame& frame) {
+    const auto active=frame.render;
+    if(!nativePreparePso_||nativeRoot_.Get()!=root||!Inside(active,plan_.minimum,plan_.maximum)||!nativeConstantsMapped_||nativeConstantSlots_>=4096)return false;
+    referenced_=true;
+    // Every evaluation receives a fresh 256-byte slot. None is overwritten
+    // while this bounded session's GPU commands may still reference it.
+    const auto offset=UINT64(nativeConstantSlots_++)*256;
+    const float jitter[]={frame.jitter[0],frame.jitter[1],frame.previousJitter[0],frame.previousJitter[1]};
+    memcpy(nativeConstantsMapped_+offset,jitter,sizeof(jitter));
+    list->SetGraphicsRootConstantBufferView(2,nativeConstants_->GetGPUVirtualAddress()+offset);
+    // Native t1/t2 are already legally pixel-readable at this exact draw. Sample
+    // them with the existing descriptors; no guessed source-state transition.
+    Transition(list,motion_.Get(),motionState_,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    Transition(list,depth_.Get(),depthState_,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    auto rtvs=nativeRtvs_->GetCPUDescriptorHandleForHeapStart();list->OMSetRenderTargets(2,&rtvs,TRUE,nullptr);
+    list->SetPipelineState(nativePreparePso_.Get());list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    const D3D12_VIEWPORT viewport{0,0,float(active.width),float(active.height),0,1};const D3D12_RECT scissor{0,0,LONG(active.width),LONG(active.height)};
+    list->RSSetViewports(1,&viewport);list->RSSetScissorRects(1,&scissor);list->DrawInstanced(3,1,0,0);
+    Transition(list,motion_.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Transition(list,depth_.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    motionState_=depthState_=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;return true;
+}
+bool QualityGpu::CaptureRasterDepth(ID3D12GraphicsCommandList* list,ID3D12Resource* source,D3D12_RESOURCE_STATES state) {
+    if(!list||!depth_||!FrameTexture(source,plan_.output,DXGI_FORMAT_R32_TYPELESS)||
+       !(source->GetDesc().Flags&D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))return false;
+    referenced_=true;
+    // Copy the whole depth/stencil subresource, before the engine can reuse it.
+    Transition(list,source,state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Transition(list,depth_.Get(),depthState_,D3D12_RESOURCE_STATE_COPY_DEST);
+    list->CopyResource(depth_.Get(),source);
+    Transition(list,source,D3D12_RESOURCE_STATE_COPY_SOURCE,state);
+    Transition(list,depth_.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    depthState_=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;return true;
+}
 NVSDK_NGX_Result QualityGpu::Evaluate(const QualityFrame& f) {
-    if(!params_||!f.list||!f.associated||!Matches(f.packedMotion)||
+    if(!params_||!f.list||!f.associated||!Matches(f.packedMotion)||((f.depthIsRaster||f.nativeInputs)&&depthState_!=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)||
+       (f.nativeInputs&&motionState_!=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)||
        !Inside(f.render,plan_.minimum,plan_.maximum)||f.render.width!=plan_.aligned.width||f.render.height!=plan_.aligned.height||
        !FrameTexture(f.color,plan_.output,DXGI_FORMAT_R11G11B10_FLOAT)||
-       !FrameTexture(f.depth,plan_.output,DXGI_FORMAT_R32_FLOAT)||
-       !FrameTexture(f.taaOutput,plan_.output,DXGI_FORMAT_R11G11B10_FLOAT)||f.color==f.taaOutput)
+       !FrameTexture(f.depth,plan_.output,f.depthIsRaster?DXGI_FORMAT_R32_TYPELESS:DXGI_FORMAT_R32_FLOAT)||
+       !FrameTexture(f.taaOutput,plan_.output,DXGI_FORMAT_R11G11B10_FLOAT))
         return NVSDK_NGX_Result_FAIL_InvalidParameter;
     for(unsigned i=0;i<2;++i)if(!std::isfinite(f.jitter[i])||!std::isfinite(f.previousJitter[i]))return NVSDK_NGX_Result_FAIL_InvalidParameter;
     const auto creation=Prime(f.list);if(!Ok(creation))return creation;
     auto* list=f.list;
     constexpr auto read=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    if(!f.nativeInputs) {
     Transition(list,f.packedMotion,f.motionState,read);
     ID3D12DescriptorHeap* heaps[]={heap_.Get()};list->SetDescriptorHeaps(1,heaps);
     list->SetComputeRootSignature(decodeRoot_.Get());list->SetPipelineState(decodePso_.Get());
@@ -114,8 +196,13 @@ NVSDK_NGX_Result QualityGpu::Evaluate(const QualityFrame& f) {
     list->SetComputeRoot32BitConstants(1,8,&values,0);list->Dispatch((f.render.width+7)/8,(f.render.height+7)/8,1);
     Transition(list,motion_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,read);
     Transition(list,f.packedMotion,read,f.motionState);
-    Transition(list,f.color,f.colorState,read);Transition(list,f.depth,f.depthState,read);
-    params_->Set("Color",f.color);params_->Set("Depth",f.depth);params_->Set("MotionVectors",motion_.Get());params_->Set("Output",output_.Get());
+    }
+    Transition(list,f.color,f.colorState,read);
+    auto* depthInput=f.depth;
+    if(f.depthIsRaster||f.nativeInputs) {
+        depthInput=depth_.Get();
+    }else Transition(list,f.depth,f.depthState,read);
+    params_->Set("Color",f.color);params_->Set("Depth",depthInput);params_->Set("MotionVectors",motion_.Get());params_->Set("Output",output_.Get());
     params_->Set("Jitter.Offset.X",f.jitter[0]*float(f.render.width)*-0.5f);
     params_->Set("Jitter.Offset.Y",f.jitter[1]*float(f.render.height)*0.5f);
     params_->Set("MV.Scale.X",-0.5f*float(f.render.width)/float(plan_.output.width));
@@ -128,8 +215,9 @@ NVSDK_NGX_Result QualityGpu::Evaluate(const QualityFrame& f) {
     params_->Set("DLSS.Pre.Exposure",1.0f);params_->Set("DLSS.Exposure.Scale",1.0f);
     params_->Set("ExposureTexture",static_cast<ID3D12Resource*>(nullptr));
     const auto result=api_.evaluate(list,feature_,params_,nullptr);
-    Transition(list,f.color,read,f.colorState);Transition(list,f.depth,read,f.depthState);
-    Transition(list,motion_.Get(),read,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Transition(list,f.color,read,f.colorState);
+    if(!f.depthIsRaster&&!f.nativeInputs)Transition(list,f.depth,read,f.depthState);
+    if(!f.nativeInputs)Transition(list,motion_.Get(),read,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     // A failed evaluation NEVER writes stale/uninitialized output into the game.
     if(Ok(result)) {
         Transition(list,output_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);

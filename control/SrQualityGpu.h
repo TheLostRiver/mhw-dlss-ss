@@ -12,20 +12,29 @@ struct QualityFrame {
     D3D12_RESOURCE_STATES colorState{},depthState{},motionState{},outputState{};
     Size render{};
     float jitter[2]{},previousJitter[2]{};
-    bool associated=false,reset=true;
+    bool associated=false,reset=true,depthIsRaster=false,nativeInputs=false;
 };
 class QualityGpu {
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
     Dispatch api_{};
     Plan plan_{};
     Ptr<ID3D12Device> device_;
-    Ptr<ID3D12Resource> motion_,output_,vertices_,packed_;
+    Ptr<ID3D12Resource> motion_,output_,vertices_,packed_,depth_;
     Ptr<ID3D12DescriptorHeap> heap_;
     Ptr<ID3D12RootSignature> decodeRoot_;
     Ptr<ID3D12PipelineState> decodePso_;
+    Ptr<ID3D12RootSignature> nativeRoot_;
+    Ptr<ID3D12PipelineState> nativePreparePso_;
+    Ptr<ID3D12DescriptorHeap> nativeRtvs_;
+    Ptr<ID3D12Resource> nativeConstants_;
+    unsigned char* nativeConstantsMapped_{};
+    unsigned nativeConstantSlots_=0;
     Ptr<ID3D12Fence> fence_;
     NVSDK_NGX_Parameter* params_{};
     NVSDK_NGX_Handle* feature_{};
+    D3D12_RESOURCE_STATES depthState_=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES motionState_=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    UINT nativeRtvStride_=0;
     bool referenced_=false;
     UINT stride_=0;
     D3D12_VERTEX_BUFFER_VIEW quad_{},triangle_{};
@@ -38,6 +47,10 @@ public:
     // potentially GPU-referenced BEFORE CreateFeature, including failed calls.
     bool Prepare(const Dispatch&,const Plan&,ID3D12Device*,ID3D12Resource* packed);
     NVSDK_NGX_Result Prime(ID3D12GraphicsCommandList*);
+    bool CaptureRasterDepth(ID3D12GraphicsCommandList*,ID3D12Resource*,D3D12_RESOURCE_STATES);
+    bool PrepareNativeInputs(ID3D12RootSignature*);
+    bool NativeInputsReady()const{return nativePreparePso_!=nullptr;}
+    bool RecordNativeInputs(ID3D12GraphicsCommandList*,ID3D12RootSignature*,const QualityFrame&);
     NVSDK_NGX_Result Evaluate(const QualityFrame&);
     bool Matches(ID3D12Resource* packed)const{return packed_.Get()==packed;}
     bool Referenced()const{return referenced_;}

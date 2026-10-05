@@ -12,8 +12,10 @@ struct VertexCopyRange {UINT64 destination=0,source=0,bytes=0;};
 struct TextureHeap {UINT64 gpu=0,cpu=0;unsigned count=0,stride=0;};
 struct TextureRoots {uintptr_t signature=0;std::array<UINT64,32> tables{},cbvs{};};
 struct TextureList {TextureHeap heap{};TextureRoots compute{},graphics{};std::array<UINT64,8> targets{};unsigned targetCount=0;
-    std::array<ID3D12DescriptorHeap*,2> heaps{};unsigned heapCount=0;};
+    std::array<ID3D12DescriptorHeap*,2> heaps{};unsigned heapCount=0;uintptr_t depthResource=0;UINT64 depthHandle=0;};
 struct QualityMark {uintptr_t color=0,taa=0,copy=0,tone=0;unsigned stage=0;bool sr=false;};
+struct QualityDepthWrite {uintptr_t source=0,destination=0;unsigned width=0,height=0;uint64_t generation=0,sequence=0;};
+struct QualitySceneDepth {uintptr_t resource=0,gbuffer=0;unsigned width=0,height=0;uint64_t generation=0,sequence=0;};
 struct PreparedDepthTrace {uintptr_t source=0,prepared=0;unsigned width=0,height=0,format=0;uint64_t generation=0,sequence=0;};
 struct ListTrace {
     ID3D12PipelineState* pso{};D3D12_VIEWPORT view{};bool hasView=false;uint64_t generation=0;
@@ -27,6 +29,11 @@ struct ListTrace {
     D3D12_RECT scissor{};bool hasScissor=false;
     PreparedDepthTrace preparedDepth{};
     QualityMark quality{};
+    QualityDepthWrite qualityDepth{};uint64_t lastQualityDepth=0;
+    bool qualityDepthRenderPending=false;
+    QualitySceneDepth qualitySceneDepth{};uint64_t lastQualitySceneDepth=0;
+    QualitySceneDepth qualityDepthSnapshot{};
+    mhwsr::QualityFrame qualityCandidate{};UINT64 qualityCamera=0,qualityScreen=0;
     D3D_PRIMITIVE_TOPOLOGY topology=D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 };
 std::unordered_map<ID3D12GraphicsCommandList*,ListTrace> g_bridgeLists;
@@ -119,6 +126,10 @@ void InvalidateQualityBindings(ID3D12GraphicsCommandList*);
 bool RunQualityTaa(ID3D12GraphicsCommandList*,const TaaScreenInput&);
 bool RunQualityDraw(ID3D12GraphicsCommandList*,UINT,UINT,UINT,UINT);
 bool RunQualityCopy(ID3D12GraphicsCommandList*,const D3D12_TEXTURE_COPY_LOCATION*,UINT,UINT,UINT,const D3D12_TEXTURE_COPY_LOCATION*,const D3D12_BOX*);
+void RecordQualityDepthCopy(ID3D12GraphicsCommandList*,ID3D12Resource*,ID3D12Resource*,const D3D12_TEXTURE_COPY_LOCATION*,const D3D12_TEXTURE_COPY_LOCATION*,UINT,UINT,UINT,const D3D12_BOX*);
+void RecordQualityDepthDraw(ID3D12GraphicsCommandList*,UINT,UINT,UINT,UINT);
+void RecordQualitySceneDepth(ID3D12GraphicsCommandList*);
+void CaptureQualitySceneDepth(ID3D12GraphicsCommandList*,UINT,const D3D12_CPU_DESCRIPTOR_HANDLE*,BOOL);
 void ResetQualityList(ID3D12GraphicsCommandList*);
 #include "BridgeVertexReader.inl"
 #include "BridgeEngineVertices.inl"
