@@ -49,7 +49,7 @@ void LoadHost(HANDLE process,DWORD pid,const std::filesystem::path& dll) {
     }
     VirtualFreeEx(process,allocation,0,MEM_RELEASE);
     if(!ModuleBase(pid,dll.filename().wstring(),&path))throw std::runtime_error("Standalone host not found after loading");
-    Log("Standalone host loaded. See MhwNativeHost-<PID>.jsonl for readiness; this build captures inputs only.");
+    Log("Standalone host loaded. See MhwNativeHost-<PID>.jsonl for readiness; SR is not enabled in this diagnostic build.");
 }
 }
 int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {

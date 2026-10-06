@@ -1,5 +1,5 @@
-// Standalone input host, first stage: capture native camera/screen bindings.
-// No SR commands, scale changes, projection writes, or third-party host callbacks.
+// Standalone native input host with an optional, bounded projection-jitter pulse.
+// No SR commands, render-scale changes, or third-party host callbacks.
 #include "../readback/CaptureCommon.h"
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -14,6 +14,10 @@
 #include <unordered_map>
 #include <algorithm>
 
+extern "C" {
+void MhwProjectionGateway();
+void* MhwProjectionTrampoline=nullptr;
+}
 namespace {
 using Microsoft::WRL::ComPtr;
 constexpr char kGameHash[]="c2ebbbd2c49f216d484e31a5219bed419eb1e5e7d206d02cba040a3ab79d90ea";
@@ -21,6 +25,7 @@ constexpr char kTaaShader[]="2d7b26c742c27db2c83546c6cf6a1dfda47d7cfd4336e69f8c2
 HMODULE g_self{};
 std::atomic<bool> g_observing{false},g_capture{false};
 std::atomic<unsigned> g_busy{0};
+std::atomic<uint64_t> g_session{0},g_sessionFirstTaa{0};
 std::atomic<uint64_t> g_dispatches{0},g_taaSamples{0},g_valid{0},g_nonzeroJitter{0},g_fresh{0};
 std::atomic<unsigned> g_arenaCaptures{0},g_computePipelines{0};
 std::mutex g_mutex,g_logMutex;
@@ -61,6 +66,7 @@ ResourceCreate g_resourceCreate{};GpuAddress g_gpuAddress{};ComputeCreate g_comp
 Pipeline g_pipeline{},g_clear{};Dispatch g_dispatch{};Cbv g_cbv{};Reset g_reset{};
 struct Hook {void* address=nullptr;std::array<unsigned char,16> original{},patch{};bool enabled=false;};
 std::vector<Hook> g_hooks;
+#include "NativeProjection.inl"
 
 void ObserveArena(ID3D12Resource* resource,UINT64 knownAddress=0) {
     if(!resource||!Active())return;Busy busy;Internal internal;
@@ -133,15 +139,16 @@ const unsigned char* BufferAddress(UINT64 address,size_t bytes) {
 }
 void ObserveDispatch(ID3D12GraphicsCommandList* list,UINT x,UINT y,UINT z) {
     if(!Active()||!g_capture.load())return;Busy busy;
-    ++g_dispatches;std::array<unsigned,27> screen{};float jitter[2]{},previous[2]{};bool fresh=false,copied=false;
+    ++g_dispatches;std::array<unsigned,27> screen{};float projection[16]{},previousProjection[16]{};bool fresh=false,copied=false;
+    const float* jitter=projection+8;const float* previous=previousProjection+8;
     uint64_t generation=0;unsigned psoCount=0,arenaCount=0;
     {
         std::lock_guard<std::mutex> lock(g_mutex);const auto found=g_lists.find(list);
         if(found==g_lists.end()||!g_taaPsos.count(found->second.pso))return;
         auto& s=found->second;generation=s.generation;fresh=s.cameraEpoch>s.lastTaa&&s.screenEpoch>s.lastTaa;s.lastTaa=s.epoch;
-        const auto* camera=BufferAddress(s.camera,712);const auto* data=BufferAddress(s.screen,sizeof(screen));
+        const auto* camera=BufferAddress(s.camera,736);const auto* data=BufferAddress(s.screen,sizeof(screen));
         copied=!(s.camera&255)&&!(s.screen&255)&&camera&&data&&CopyBytes(screen.data(),data,sizeof(screen))&&
-            CopyBytes(jitter,camera+160,8)&&CopyBytes(previous,camera+704,8);
+            CopyBytes(projection,camera+128,sizeof(projection))&&CopyBytes(previousProjection,camera+672,sizeof(previousProjection));
         psoCount=unsigned(g_taaPsos.size());for(const auto& a:g_arenas)if(a.resource)++arenaCount;
     }
     const auto serial=++g_taaSamples;float width=0,height=0,scale=0;memcpy(&width,&screen[4],4);memcpy(&height,&screen[5],4);memcpy(&scale,&screen[21],4);
@@ -151,13 +158,23 @@ void ObserveDispatch(ID3D12GraphicsCommandList* list,UINT x,UINT y,UINT z) {
         std::isfinite(scale)&&scale>=0.5f&&scale<=1.0f;
     if(fresh)++g_fresh;if(valid)++g_valid;
     const bool nonzero=valid&&(std::fabs(jitter[0])+std::fabs(jitter[1])>0.00000001f);if(nonzero)++g_nonzeroJitter;
-    if(serial>16&&serial%120!=0&&valid)return;
+    ObserveProjectionInput(valid,valid?unsigned(width):0,valid?unsigned(height):0,screen[10],screen[11],projection,previousProjection,serial);
+    const auto phase=ProjectionPhaseName();
+    // Keep continuous records for the short pulse and recovery, to inspect history.
+    if(phase=="baseline"&&serial>g_sessionFirstTaa.load()+16&&serial%120!=0&&valid)return;
     std::ostringstream out;out<<std::setprecision(9)<<"{\"event\":\"native_taa_input\",\"serial\":"<<serial
+        <<",\"session\":"<<g_session.load()<<",\"phase\":\""<<phase<<'"'
         <<",\"valid\":"<<(valid?"true":"false")<<",\"copied\":"<<(copied?"true":"false")<<",\"fresh\":"<<(fresh?"true":"false")
         <<",\"known_psos\":"<<psoCount<<",\"known_arenas\":"<<arenaCount<<",\"dispatch\":["<<x<<','<<y<<','<<z<<']';
     if(valid)out<<",\"output\":["<<width<<','<<height<<"],\"input\":["<<screen[10]<<','<<screen[11]<<"],\"scale\":"<<scale
         <<",\"projection_jitter\":["<<jitter[0]<<','<<jitter[1]<<"],\"previous_projection_jitter\":["<<previous[0]<<','<<previous[1]<<']';
-    out<<",\"modifies_rendering\":false}";Log(out.str());
+    if(copied&&serial<=g_sessionFirstTaa.load()+4){
+        out<<",\"projection_matrices\":[";
+        for(unsigned i=0;i<32;++i){if(i)out<<',';const float v=i<16?projection[i]:previousProjection[i-16];
+            if(std::isfinite(v))out<<v;else out<<"null";}
+        out<<']';
+    }
+    out<<",\"sr_execution\":false}";Log(out.str());
 }
 void STDMETHODCALLTYPE OnDispatch(ID3D12GraphicsCommandList* list,UINT x,UINT y,UINT z) {try{ObserveDispatch(list,x,y,z);}catch(...){Log("{\"event\":\"native_input_exception\"}");}g_dispatch(list,x,y,z);}
 
@@ -176,15 +193,68 @@ template<class Fn> void HookMethod(HMODULE core,const std::filesystem::path& met
     if(MH_CreateHook(hook.address,callback,reinterpret_cast<void**>(&original))!=MH_OK)throw std::runtime_error("Native API hook creation failed");
     g_hooks.push_back(hook);
 }
+void CreateProjectionHook() {
+    // Reserve the nearby trampoline early, but do not enable it until the full
+    // game hash has passed. A 7-byte LEA is displaced, with no relative operand.
+    Hook hook;hook.address=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr))+0x228eeb8;
+    hook.original={0x4c,0x8d,0x83,0x30,0x01,0x00,0x00,0x48,0x8b,0xd0,0x8b,0x08,0x41,0x89,0x08,0x8b};
+    unsigned char current[16]{};
+    if(!CopyBytes(current,hook.address,16)||memcmp(current,hook.original.data(),16))throw std::runtime_error("Native projection site differs");
+    if(MH_CreateHook(hook.address,reinterpret_cast<void*>(&MhwProjectionGateway),&MhwProjectionTrampoline)!=MH_OK)
+        throw std::runtime_error("Native projection trampoline allocation failed");
+    g_hooks.push_back(hook);
+}
+void EnableHook(Hook& hook) {
+    if(memcmp(hook.address,hook.original.data(),16))throw std::runtime_error("Hook target changed before enable");
+    if(MH_EnableHook(hook.address)!=MH_OK)throw std::runtime_error("Native hook enable failed");
+    hook.enabled=true;memcpy(hook.patch.data(),hook.address,16);
+}
 void Stop() {
-    g_capture.store(false);g_observing.store(false);bool restored=true;
+    EndProjectionCapture();g_capture.store(false);g_observing.store(false);bool restored=true;
     for(auto& h:g_hooks)if(h.enabled){if(memcmp(h.address,h.patch.data(),16)||MH_DisableHook(h.address)!=MH_OK)restored=false;else h.enabled=false;}
     const auto deadline=GetTickCount64()+2000;while(g_busy.load()&&GetTickCount64()<deadline)Sleep(10);
     if(!g_busy.load()) {
         std::lock_guard<std::mutex> lock(g_mutex);const D3D12_RANGE noWrite{0,0};
-        for(auto& a:g_arenas)if(a.resource){a.resource->Unmap(0,&noWrite);a={};}g_psoReferences.clear();
+        for(auto& a:g_arenas)if(a.resource){a.resource->Unmap(0,&noWrite);a={};}g_psoReferences.clear();g_taaPsos.clear();g_lists.clear();
     }
     Log(std::string("{\"event\":\"native_host_stopped\",\"owned_hooks_restored\":")+(restored?"true":"false")+",\"modifies_rendering\":false}");
+}
+bool CaptureWait(HANDLE cancel,const std::filesystem::path& ini,uint64_t end,bool watchProjection=false) {
+    uint64_t nextConfigCheck=0;
+    while(GetTickCount64()<end){
+        if(WaitForSingleObject(cancel,25)==WAIT_OBJECT_0)throw std::runtime_error("Native capture cancelled");
+        if(GetTickCount64()>=nextConfigCheck){nextConfigCheck=GetTickCount64()+250;
+            if(GetPrivateProfileIntW(L"Standalone",L"Enabled",0,ini.c_str())!=1)throw std::runtime_error("Native capture disabled");}
+        if(watchProjection&&g_projectionFaulted.load())return false;
+    }
+    return true;
+}
+void RunCapture(HANDLE cancel,const std::filesystem::path& ini,bool projectionPulse) {
+    const auto session=++g_session;
+    const auto dispatches=g_dispatches.load(),taa=g_taaSamples.load(),valid=g_valid.load(),fresh=g_fresh.load(),nonzero=g_nonzeroJitter.load();
+    g_sessionFirstTaa.store(taa);BeginProjectionCapture(projectionPulse);
+    Log("{\"event\":\"native_capture_started\",\"session\":"+std::to_string(session)+
+        ",\"projection_pulse_requested\":"+(projectionPulse?"true":"false")+",\"mhwss_loaded\":false,\"sr_execution\":false}");
+    g_capture.store(true);
+    if(projectionPulse){
+        CaptureWait(cancel,ini,GetTickCount64()+1500);
+        if(StartProjectionPulse()){
+            const auto end=GetTickCount64()+10000;
+            Log("{\"event\":\"native_projection_pulse_started\",\"duration_ms\":10000,\"phases\":8,\"sr_execution\":false}");
+            Beep(880,120);CaptureWait(cancel,ini,end,true);
+        }else Log("{\"event\":\"native_projection_pulse_refused\",\"modifies_rendering\":false}");
+        EndProjectionPulse();Beep(440,200);
+        Log("{\"event\":\"native_projection_writes_disabled\",\"recovery_ms\":1000}");
+        CaptureWait(cancel,ini,GetTickCount64()+1000);
+    }else{
+        const auto end=GetTickCount64()+10000;Beep(880,120);CaptureWait(cancel,ini,end);Beep(440,200);
+    }
+    g_capture.store(false);EndProjectionCapture();
+    Log("{\"event\":\"native_input_summary\",\"session\":"+std::to_string(session)+",\"dispatches\":"+std::to_string(g_dispatches.load()-dispatches)+
+        ",\"taa_samples\":"+std::to_string(g_taaSamples.load()-taa)+",\"valid_inputs\":"+std::to_string(g_valid.load()-valid)+
+        ",\"fresh_cbvs\":"+std::to_string(g_fresh.load()-fresh)+",\"nonzero_jitter\":"+std::to_string(g_nonzeroJitter.load()-nonzero)+
+        ",\"arena_captures\":"+std::to_string(g_arenaCaptures.load())+",\"compute_pipelines\":"+std::to_string(g_computePipelines.load())+",\"sr_execution\":false}");
+    LogProjectionSummary(session);
 }
 DWORD WINAPI Worker(void*) {
     HANDLE start=nullptr,cancel=nullptr;const auto folder=ModulePath(g_self).parent_path(),ini=folder/L"MhwNativeHost.ini";
@@ -193,13 +263,17 @@ DWORD WINAPI Worker(void*) {
         g_log.open(folder/(L"MhwNativeHost-"+std::to_wstring(GetCurrentProcessId())+L".jsonl"),std::ios::app);
         if(GetModuleHandleW(L"MHWSS.dll"))throw std::runtime_error("Standalone capture requires a process without MHWSS loaded");
         HMODULE pinned{};if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(g_self),&pinned))throw std::runtime_error("Host pin failed");
+        const bool projectionPulse=GetPrivateProfileIntW(L"Standalone",L"ProjectionPulse",0,ini.c_str())==1;
+        const bool keepArmed=GetPrivateProfileIntW(L"Standalone",L"KeepArmed",0,ini.c_str())==1;
+        if(MH_Initialize()!=MH_OK)throw std::runtime_error("Native hook initialization failed");
+        if(projectionPulse)CreateProjectionHook();
+        const size_t nativeFirst=g_hooks.size();
         HMODULE core=nullptr;const auto deadline=GetTickCount64()+60000;
         while(!core&&GetTickCount64()<deadline){core=GetModuleHandleW(L"D3D12Core.dll");if(!core)Sleep(10);}
         const auto methods=folder/L"MhwNativeMethods.ini";const auto expected=Ini(methods,L"CoreSha256");
         const auto actual=core?FileSha256(ModulePath(core)):std::string();
         if(!core||std::wstring(actual.begin(),actual.end())!=expected)throw std::runtime_error("Native D3D12 runtime differs from calibration");
         if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(core),&pinned))throw std::runtime_error("Native runtime pin failed");
-        if(MH_Initialize()!=MH_OK)throw std::runtime_error("Native hook initialization failed");
         HookMethod(core,methods,L"CreateCommittedResource",reinterpret_cast<void*>(&OnResourceCreate),g_resourceCreate);
         HookMethod(core,methods,L"GetGPUVirtualAddress",reinterpret_cast<void*>(&OnGpuAddress),g_gpuAddress);
         HookMethod(core,methods,L"CreateComputePipelineState",reinterpret_cast<void*>(&OnComputeCreate),g_computeCreate);
@@ -209,37 +283,42 @@ DWORD WINAPI Worker(void*) {
         HookMethod(core,methods,L"SetComputeRootConstantBufferView",reinterpret_cast<void*>(&OnCbv),g_cbv);
         HookMethod(core,methods,L"Dispatch",reinterpret_cast<void*>(&OnDispatch),g_dispatch);
         g_observing.store(true);
-        for(auto& h:g_hooks){if(MH_EnableHook(h.address)!=MH_OK)throw std::runtime_error("Native hook enable failed");h.enabled=true;memcpy(h.patch.data(),h.address,16);}
+        for(size_t i=nativeFirst;i<g_hooks.size();++i)EnableHook(g_hooks[i]);
         // Capture startup-created buffers before the potentially large EXE hash.
         // These hooks only observe API objects; no rendering is changed.
         if(FileSha256(ModulePath(nullptr))!=kGameHash)throw std::runtime_error("Game build differs");
-        Log("{\"event\":\"native_host_ready\",\"independent_host\":true,\"sr_execution\":false,\"modifies_rendering\":false}");
+        if(projectionPulse)EnableHook(g_hooks[0]);
+        Log(std::string("{\"event\":\"native_host_ready\",\"version\":2,\"independent_host\":true,\"projection_pulse_available\":")+
+            (projectionPulse?"true":"false")+",\"rearmable\":"+(keepArmed?"true":"false")+",\"sr_execution\":false,\"modifies_rendering\":false}");
         const auto prefix=L"Local\\MhwNativeHost."+std::to_wstring(GetCurrentProcessId());
         start=CreateEventW(nullptr,FALSE,FALSE,(prefix+L".Start").c_str());cancel=CreateEventW(nullptr,TRUE,FALSE,(prefix+L".Cancel").c_str());
         if(!start||!cancel)throw std::runtime_error("Native control events unavailable");
         HANDLE events[]{cancel,start};
         bool keyWasDown=true;uint64_t nextConfigCheck=0;
-        while(true){const auto wait=WaitForMultipleObjects(2,events,FALSE,25);if(wait==WAIT_OBJECT_0+1)break;
+        while(true){const auto wait=WaitForMultipleObjects(2,events,FALSE,25);bool triggered=wait==WAIT_OBJECT_0+1;
             if(wait==WAIT_OBJECT_0)throw std::runtime_error("Native capture cancelled");
             if(GetTickCount64()>=nextConfigCheck){nextConfigCheck=GetTickCount64()+1000;
                 if(GetPrivateProfileIntW(L"Standalone",L"Enabled",0,ini.c_str())!=1)throw std::runtime_error("Native capture disabled");}
             DWORD foreground=0;GetWindowThreadProcessId(GetForegroundWindow(),&foreground);
             const bool down=(GetAsyncKeyState(VK_F8)&0x8000)!=0;
-            if(foreground==GetCurrentProcessId()){if(down&&!keyWasDown)break;keyWasDown=down;}else keyWasDown=true;
+            if(foreground==GetCurrentProcessId()){if(down&&!keyWasDown)triggered=true;keyWasDown=down;}else keyWasDown=true;
+            if(!triggered)continue;
+            if(GetModuleHandleW(L"MHWSS.dll"))throw std::runtime_error("A third-party host was loaded after startup");
+            ResetEvent(start);RunCapture(cancel,ini,projectionPulse);ResetEvent(start);keyWasDown=true;
+            if(!keepArmed)break;
+            Log("{\"event\":\"native_host_rearmed\",\"projection_writes_enabled\":false,\"sr_execution\":false}");
         }
-        if(GetModuleHandleW(L"MHWSS.dll"))throw std::runtime_error("A third-party host was loaded after startup");
-        const auto end=GetTickCount64()+10000;
-        Log("{\"event\":\"native_capture_started\",\"duration_ms\":10000,\"mhwss_loaded\":false,\"sr_execution\":false}");g_capture.store(true);Beep(880,120);
-        while(GetTickCount64()<end&&WaitForSingleObject(cancel,100)!=WAIT_OBJECT_0){}
-        g_capture.store(false);Beep(440,200);
-        Log("{\"event\":\"native_input_summary\",\"dispatches\":"+std::to_string(g_dispatches.load())+",\"taa_samples\":"+std::to_string(g_taaSamples.load())+
-            ",\"valid_inputs\":"+std::to_string(g_valid.load())+",\"fresh_cbvs\":"+std::to_string(g_fresh.load())+",\"nonzero_jitter\":"+std::to_string(g_nonzeroJitter.load())+
-            ",\"arena_captures\":"+std::to_string(g_arenaCaptures.load())+",\"compute_pipelines\":"+std::to_string(g_computePipelines.load())+",\"sr_execution\":false}");
     }catch(const std::exception& e){Log(std::string("{\"event\":\"native_host_refused\",\"reason\":\"")+e.what()+"\"}");}
     Stop();if(start)CloseHandle(start);if(cancel)CloseHandle(cancel);WritePrivateProfileStringW(L"Standalone",L"Enabled",L"0",ini.c_str());return 0;
 }
 volatile LONG g_started=0;
 void Start(){if(InterlockedCompareExchange(&g_started,1,0))return;const auto thread=CreateThread(nullptr,0,Worker,nullptr,0,nullptr);if(thread)CloseHandle(thread);}
+}
+extern "C" void MhwObserveProjection(float* result,const unsigned char* view,float* scratch,unsigned slot) noexcept {
+    try{ObserveProjection(result,view,scratch,slot);}catch(...){
+        g_projectionFaulted.store(true);g_projectionCapturing.store(false);
+        Log("{\"event\":\"native_projection_callback_exception\",\"projection_writes_enabled\":false}");
+    }
 }
 extern "C" __declspec(dllexport) void Initialize(){Start();}
 BOOL APIENTRY DllMain(HMODULE self,DWORD reason,LPVOID){if(reason==DLL_PROCESS_ATTACH){g_self=self;Start();}return TRUE;}

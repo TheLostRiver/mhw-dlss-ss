@@ -24,6 +24,7 @@ __pycache__/
 *.dxbc
 *.dxil
 *.asm
+!/standalone/ProjectionGateway.asm
 *.log
 *.jsonl
 *.dmp

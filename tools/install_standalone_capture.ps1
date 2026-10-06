@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory=$true,ParameterSetName='Restore')][string]$RestoreBackup
 )
 $ErrorActionPreference = 'Stop'
+$supportedKinds = @('standalone-input-capture-v1','standalone-projection-capture-v2')
 $allowedFiles = @('MhwSrLauncher.exe','MhwNativeHost.dll','MhwNativeHost.ini','MhwNativeMethods.ini','MhwSr-MinHook-LICENSE.txt')
 $allowedDisable = @('d3d12.dll','MHWSS.dll','nativePC\plugins\MhwSrProbe.dll','nativePC\plugins\MhwSrBridge.dll',
     'nativePC\plugins\MhwScreenProbe.dll','nativePC\plugins\MhwScreenProbe_v2.dll','nativePC\plugins\MhwScreenProbe_v3.dll',
@@ -62,14 +63,14 @@ Require-Stopped
 if ($PSCmdlet.ParameterSetName -eq 'Restore') {
     $backupRoot = (Resolve-Path -LiteralPath $RestoreBackup).Path
     $state = Get-Content -LiteralPath (Join-Path $backupRoot 'install-state.json') -Raw | ConvertFrom-Json
-    if ($state.kind -ne 'standalone-input-capture-v1') { throw 'Unknown backup format.' }
+    if ($supportedKinds -notcontains $state.kind) { throw 'Unknown backup format.' }
     Restore-Install $backupRoot $state
     return
 }
 $gameRoot = (Resolve-Path -LiteralPath $GameDirectory).Path
 $stageRoot = (Resolve-Path -LiteralPath $StageDirectory).Path
 $manifest = Get-Content -LiteralPath (Join-Path $stageRoot 'manifest.json') -Raw | ConvertFrom-Json
-if ($manifest.kind -ne 'standalone-input-capture-v1' -or $manifest.files.Count -ne $allowedFiles.Count) { throw 'Unexpected stage manifest.' }
+if ($supportedKinds -notcontains $manifest.kind -or $manifest.files.Count -ne $allowedFiles.Count) { throw 'Unexpected stage manifest.' }
 Require-Hash (Inside-File $gameRoot 'MonsterHunterWorld.exe') 'c2ebbbd2c49f216d484e31a5219bed419eb1e5e7d206d02cba040a3ab79d90ea'
 $seen = @{}
 foreach ($entry in $manifest.files) {
@@ -83,7 +84,7 @@ foreach ($entry in $manifest.disable) {
 }
 $backupRoot = Join-Path $stageRoot ('backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
 $null = New-Item -ItemType Directory -Path $backupRoot
-$state = [ordered]@{kind='standalone-input-capture-v1';game_directory=$gameRoot;installed=@();disabled=@();game_started=$false}
+$state = [ordered]@{kind=$manifest.kind;game_directory=$gameRoot;installed=@();disabled=@();game_started=$false}
 foreach ($entry in $manifest.files) {
     $target = Inside-File $gameRoot $entry.name
     $existed = Test-Path -LiteralPath $target
@@ -111,5 +112,5 @@ try {
     Restore-Install $backupRoot ([pscustomobject]$state)
     throw $failure
 }
-[pscustomobject]@{Installed=$gameRoot;Backup=$backupRoot;Stage='Native input capture only; SR is not enabled';
+[pscustomobject]@{Installed=$gameRoot;Backup=$backupRoot;Stage='Native input capture and optional bounded projection pulse; SR is not enabled';
     SteamLaunchOption='cmd /c start "" MhwSrLauncher.exe & rem %command%';GameStarted=$false} | ConvertTo-Json
