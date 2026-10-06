@@ -13,6 +13,7 @@
 #include <set>
 #include <intrin.h>
 #include <unordered_map>
+#include <algorithm>
 #include "SrParameterAdapter.h"
 #include "SrQualityGpu.h"
 
@@ -55,6 +56,8 @@ bool g_pulseJitter=false;
 bool g_traceTextures=false;
 unsigned g_windowMs=3000;
 bool g_windowSounds=false;
+bool g_verboseDiagnostics=true,g_gpuTimings=false;
+bool VerboseDiagnostics(){return !g_qualityMode||g_verboseDiagnostics;}
 std::atomic<uint64_t> g_windowDeadline{0};
 std::atomic<bool> g_jitterChanged{false};
 bool EnableJitterPulse();
@@ -152,7 +155,7 @@ void __fastcall OnUpdate(void* object) {
 void STDMETHODCALLTYPE OnViewports(ID3D12GraphicsCommandList* list,UINT count,const D3D12_VIEWPORT* views) {
     RecordBridgeViewport(list,count,views);
     const auto phase=g_phase.load();
-    if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&phase>=1&&phase<=3&&count==1&&views&&
+    if(VerboseDiagnostics()&&(g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&phase>=1&&phase<=3&&count==1&&views&&
        std::isfinite(views[0].Width)&&std::isfinite(views[0].Height)&&views[0].Width>=320&&views[0].Height>=180&&
        views[0].Width<=16384&&views[0].Height<=16384) try {
         std::unique_lock<std::mutex> lock(g_viewsMutex,std::try_to_lock);
@@ -179,7 +182,7 @@ uintptr_t __fastcall OnQuad(void* renderer,void* context,const int* rect,const i
     const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
     const auto callerRva=caller-reinterpret_cast<uintptr_t>(g_game);
     const auto phase=g_phase.load();
-    const bool active=(g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&phase>=1&&phase<=3;
+    const bool active=VerboseDiagnostics()&&(g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&phase>=1&&phase<=3;
     if(active)g_quadCalls.fetch_add(1,std::memory_order_relaxed);
     if(active&&(callerRva==0x23c6fee||callerRva==0x23c7b08))try {
         g_focusedQuadCalls.fetch_add(1,std::memory_order_relaxed);
@@ -301,6 +304,8 @@ void ReadBridgeConfiguration(const std::filesystem::path& ini) {
     g_windowMs=GetPrivateProfileIntW(L"Experiment",L"WindowMs",g_qualityMode?10000:3000,ini.c_str());
     if(g_windowMs<1000||g_windowMs>10000)throw std::runtime_error("WindowMs must be between 1000 and 10000; this is a bounded session");
     g_windowSounds=g_qualityMode&&GetPrivateProfileIntW(L"Experiment",L"WindowSounds",0,ini.c_str())==1;
+    g_verboseDiagnostics=GetPrivateProfileIntW(L"Experiment",L"VerboseDiagnostics",1,ini.c_str())!=0;
+    g_gpuTimings=g_qualityMode&&GetPrivateProfileIntW(L"Experiment",L"GpuTimings",0,ini.c_str())==1;
     if(g_qualityMode&&(!g_traceTextures||!g_tracePostTaa||!g_gameHooks||!g_applyScalePulse||!g_pulseJitter||!g_requireFrameGenOff))
         throw std::runtime_error("Quality prototype requires all input/graph guards, jitter, scale pulse and FrameGen-off");
     if(g_traceTextures&&(!g_gameHooks||!g_tracePostTaa))throw std::runtime_error("Texture tracing requires game and post-TAA hooks");
@@ -310,7 +315,8 @@ void ReadBridgeConfiguration(const std::filesystem::path& ini) {
         "\",\"requires_framegen_off\":"+(g_requireFrameGenOff?"true":"false")+",\"applies_scale_pulse\":"+(g_applyScalePulse?"true":"false")+
         ",\"game_hooks\":"+(g_gameHooks?"true":"false")+",\"trace_post_taa\":"+(g_tracePostTaa?"true":"false")+
         ",\"pulses_projection_jitter\":"+(g_pulseJitter?"true":"false")+",\"traces_textures\":"+(g_traceTextures?"true":"false")+
-        ",\"target_window_ms\":"+std::to_string(g_windowMs)+",\"window_sounds\":"+(g_windowSounds?"true":"false")+"}");
+        ",\"target_window_ms\":"+std::to_string(g_windowMs)+",\"window_sounds\":"+(g_windowSounds?"true":"false")+
+        ",\"verbose_diagnostics\":"+(g_verboseDiagnostics?"true":"false")+",\"gpu_timings\":"+(g_gpuTimings?"true":"false")+"}");
 }
 void Stop() noexcept {
     g_ready.store(false);bool restored=true;

@@ -4,6 +4,7 @@ TrackedTextureCopy g_trackedTextureCopy{};TrackedResourceCopy g_trackedResourceC
 std::atomic<uint64_t> g_postTaaTextureCopies{0};std::set<std::string> g_textureCopyKinds;
 void RecordPostTaaCopy(ID3D12GraphicsCommandList* list,ID3D12Resource* destination,ID3D12Resource* source,
     const D3D12_TEXTURE_COPY_LOCATION* dst,const D3D12_TEXTURE_COPY_LOCATION* src,UINT x,UINT y,UINT z,const D3D12_BOX* box) {
+    if(!VerboseDiagnostics())return;
     ListTrace state{};
     {std::lock_guard<std::mutex> lock(g_bridgeMutex);const auto f=g_bridgeLists.find(list);
         if(f==g_bridgeLists.end()||!f->second.taaSerial||f->second.postTaaOps>=3)return;state=f->second;}

@@ -33,6 +33,7 @@ void __fastcall OnPreparedDepth(void* context,ID3D12GraphicsCommandList* list,ID
     prepared->Release();
 }
 void RecordPreparedDepth(ID3D12GraphicsCommandList* list,uint64_t serial) {
+    if(!VerboseDiagnostics())return;
     if(!g_traceTextures)return;
     PreparedDepthTrace trace{};mhwsr::Size input{},output{};bool matched=false,save=false;
     {std::lock_guard<std::mutex> lock(g_bridgeMutex);const auto found=g_bridgeLists.find(list);if(found==g_bridgeLists.end())return;

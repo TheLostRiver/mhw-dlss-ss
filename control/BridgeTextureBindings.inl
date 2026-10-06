@@ -305,6 +305,7 @@ void WriteTextureIdentity(std::ostream& out,const TextureIdentity& t) {
     out<<"\"resource\":\"0x"<<std::hex<<t.resource<<std::dec<<"\",\"size\":["<<t.width<<','<<t.height<<"],\"format\":"<<t.format<<",\"flags\":"<<t.flags;
 }
 void RecordTextureSnapshot(ID3D12GraphicsCommandList* list,bool compute,uint64_t serial,unsigned drawIndex,unsigned vertices,const char* stage=nullptr,UINT x=0,UINT y=0,UINT z=0) {
+    if(!VerboseDiagnostics())return;
     if(!g_traceTextures||!(g_ready.load()&&!g_qualityCommands)||g_done.load())return;
     ListTrace state{};
     {std::lock_guard<std::mutex> lock(g_bridgeMutex);const auto f=g_bridgeLists.find(list);if(f==g_bridgeLists.end())return;state=f->second;}

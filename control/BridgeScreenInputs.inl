@@ -64,7 +64,7 @@ TaaScreenInput ReadTaaScreen(ID3D12GraphicsCommandList* list) {
         fresh=state.cbvEpochs[2]>state.lastTaaEpoch&&state.cbvEpochs[3]>state.lastTaaEpoch;
         state.lastTaaEpoch=state.bindEpoch;
         unsigned extra=0;
-        for(unsigned root=0;root<16&&extra<out.extra.size();++root)if(root!=2&&root!=3&&state.cbvs[root]) {
+        for(unsigned root=0;VerboseDiagnostics()&&root<16&&extra<out.extra.size();++root)if(root!=2&&root!=3&&state.cbvs[root]) {
             out.extra[extra].root=root;out.extra[extra].address=state.cbvs[root];++extra;
         }
     }
@@ -78,7 +78,7 @@ TaaScreenInput ReadTaaScreen(ID3D12GraphicsCommandList* list) {
         out.cameraValid=CopyConstantBytes(camera+160,out.jitter,8)&&CopyConstantBytes(camera+704,out.previousJitter,8);
         for(unsigned i=0;i<2;++i)out.cameraValid=out.cameraValid&&std::isfinite(out.jitter[i])&&std::isfinite(out.previousJitter[i])&&
             std::fabs(out.jitter[i])<0.1f&&std::fabs(out.previousJitter[i])<0.1f;
-        if(out.camera-g_screenGpuBase<=g_screenBytes-864)
+        if(VerboseDiagnostics()&&out.camera-g_screenGpuBase<=g_screenBytes-864)
             out.projectionCopied=CopyConstantBytes(camera+128,out.projectionWords.data(),64)&&
                 CopyConstantBytes(camera+672,out.projectionWords.data()+16,64)&&CopyConstantBytes(camera+800,out.projectionWords.data()+32,64);
     }
@@ -98,6 +98,7 @@ TaaScreenInput ReadTaaScreen(ID3D12GraphicsCommandList* list) {
 }
 void RecordTaaScreen(const TaaTrace& trace,const TaaScreenInput& s) {
     if(s.error)++g_taaScreenInvalid;else ++g_taaScreenValid;
+    if(!VerboseDiagnostics()&&!s.error&&trace.serial>8&&trace.serial%120!=0)return;
     if(trace.serial>32&&trace.serial%17!=0&&s.error)return;
     std::ostringstream out;out<<std::setprecision(9);
     out<<"{\"event\":\"taa_screen_input\",\"phase\":"<<g_phase.load()<<",\"taa_serial\":"<<trace.serial

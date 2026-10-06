@@ -38,6 +38,7 @@ void ObservePostTaaDraw(ID3D12GraphicsCommandList* list,UINT vertices,UINT insta
         ++found->second.postTaaOps;state=found->second;
     }
     ++g_postTaaDraws;
+    if(!VerboseDiagnostics())return; // Operation order above is still required by SR guards.
     if(state.postTaaOps<=3)RecordTextureSnapshot(list,false,state.taaSerial,state.postTaaOps,vertices);
     RecordPostTaaQuadVertices(state,vertices,instances,firstVertex,firstInstance);
     if(vertices!=3||instances!=1||firstInstance||state.vertex.StrideInBytes!=16)return;

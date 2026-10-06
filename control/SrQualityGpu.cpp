@@ -43,10 +43,18 @@ QualityGpu::~QualityGpu() {
     if(!referenced_&&params_&&api_.destroy)api_.destroy(params_);
     if(nativeConstantsMapped_)nativeConstants_->Unmap(0,nullptr);
 }
-bool QualityGpu::Prepare(const Dispatch& api,const Plan& plan,ID3D12Device* device,ID3D12Resource* packed) {
+bool QualityGpu::Prepare(const Dispatch& api,const Plan& plan,ID3D12Device* device,ID3D12Resource* packed,bool timings) {
     if(device_||!api.create||!api.evaluate||!api.allocate||!api.destroy||!api.release||!device||
        !QualityPlanValid(plan)||!FrameTexture(packed,plan.output,DXGI_FORMAT_R32_UINT))return false;
     api_=api;plan_=plan;device_=device;packed_=packed;
+    if(timings) {
+        D3D12_QUERY_HEAP_DESC q{};q.Type=D3D12_QUERY_HEAP_TYPE_TIMESTAMP;q.Count=kTimingSamples*2;
+        if(FAILED(device->CreateQueryHeap(&q,IID_PPV_ARGS(&timingQueries_))))return false;
+        D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;d.Width=UINT64(kTimingSamples)*2*sizeof(UINT64);d.Height=1;
+        d.DepthOrArraySize=1;d.MipLevels=1;d.SampleDesc.Count=1;d.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if(FAILED(device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&d,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&timingReadback_))))return false;
+    }
     const auto preparationFlags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS|D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     if(!Texture(device,plan.output,DXGI_FORMAT_R16G16_FLOAT,&motion_,preparationFlags)||
        !Texture(device,plan.output,DXGI_FORMAT_R11G11B10_FLOAT,&output_)||!Texture(device,plan.output,DXGI_FORMAT_R32_FLOAT,&depth_,preparationFlags)||
@@ -229,6 +237,31 @@ NVSDK_NGX_Result QualityGpu::Evaluate(const QualityFrame& f) {
         Transition(list,output_.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
     return result;
+}
+unsigned QualityGpu::BeginTiming(ID3D12GraphicsCommandList* list,unsigned kind,unsigned phase,Size input) {
+    if(!timingQueries_||!list||timingCount_>=kTimingSamples)return UINT_MAX;
+    const auto index=timingCount_++;timingRecords_[index]={kind,phase,input,false};referenced_=true;
+    // Timestamp queries use EndQuery at both endpoints, not BeginQuery.
+    list->EndQuery(timingQueries_.Get(),D3D12_QUERY_TYPE_TIMESTAMP,index*2);return index;
+}
+void QualityGpu::EndTiming(ID3D12GraphicsCommandList* list,unsigned token) {
+    if(!list||token>=timingCount_||timingRecords_[token].resolved)return;
+    list->EndQuery(timingQueries_.Get(),D3D12_QUERY_TYPE_TIMESTAMP,token*2+1);
+    list->ResolveQueryData(timingQueries_.Get(),D3D12_QUERY_TYPE_TIMESTAMP,token*2,2,timingReadback_.Get(),UINT64(token)*2*sizeof(UINT64));
+    timingRecords_[token].resolved=true;
+}
+bool QualityGpu::ReadTimings(UINT64 frequency,std::vector<QualityTiming>& out) {
+    if(!frequency||!timingReadback_||!timingCount_)return false;
+    const D3D12_RANGE range{0,SIZE_T(timingCount_)*2*sizeof(UINT64)};void* mapped=nullptr;
+    if(FAILED(timingReadback_->Map(0,&range,&mapped))||!mapped)return false;
+    struct Unmap {ID3D12Resource* resource;~Unmap(){const D3D12_RANGE noWrite{0,0};resource->Unmap(0,&noWrite);}} unmap{timingReadback_.Get()};
+    const auto* values=static_cast<const UINT64*>(mapped);
+    for(unsigned i=0;i<timingCount_;++i) {
+        const auto& s=timingRecords_[i];if(!s.resolved)continue;
+        const auto begin=values[2*i],end=values[2*i+1];if(!begin||end<begin)continue;
+        out.push_back({s.kind,s.phase,s.input,double(end-begin)*1000.0/double(frequency)});
+    }
+    return true;
 }
 bool QualityGpu::ReleaseAfterGpu() {
     if(feature_&&!Ok(api_.release(feature_)))return false;

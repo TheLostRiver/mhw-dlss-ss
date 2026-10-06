@@ -34,6 +34,7 @@ struct ListTrace {
     QualitySceneDepth qualitySceneDepth{};uint64_t lastQualitySceneDepth=0;
     QualitySceneDepth qualityDepthSnapshot{};
     mhwsr::QualityFrame qualityCandidate{};UINT64 qualityCamera=0,qualityScreen=0;
+    unsigned qualityTaaTiming=UINT_MAX;
     D3D_PRIMITIVE_TOPOLOGY topology=D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 };
 std::unordered_map<ID3D12GraphicsCommandList*,ListTrace> g_bridgeLists;
@@ -155,6 +156,7 @@ void QueryBridgePlans(const TaaTrace& t) {
     }
 }
 void RecordDispatchCandidate(const TaaTrace& t) {
+    if(!VerboseDiagnostics())return;
     if(!g_sceneInvocation.serial||!g_sceneInvocation.inputObserved)return;
     const auto key=std::make_tuple(t.pso,t.groups[0],t.groups[1],t.groups[2]);
     {
@@ -196,6 +198,7 @@ bool __fastcall OnMhwDispatch(void* self,ID3D12GraphicsCommandList* list,UINT x,
     TaaScreenInput screen{};
     if(matched)screen=ReadTaaScreen(list);
     const bool quality=matched&&g_qualityMode&&RunQualityTaa(list,screen);
+    if(matched&&g_qualityMode&&!quality)BeginQualityTaaTiming(list,screen);
     const auto mhwssResult=g_dispatchCallback(self,list,x,y,z);
     const bool result=mhwssResult||quality;
     if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&g_sceneInvocation.serial&&g_sceneInvocation.inputObserved)try {

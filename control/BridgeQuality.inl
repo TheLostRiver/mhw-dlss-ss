@@ -352,7 +352,7 @@ bool RunQualityTaa(ID3D12GraphicsCommandList* list,const TaaScreenInput& screen)
             if(FAILED(list->GetDevice(IID_PPV_ARGS(&device)))||FAILED(queue->GetDevice(IID_PPV_ARGS(&queueDevice)))||device.Get()!=queueDevice.Get())return false;
             QualityCommands internal;
             auto candidate=std::make_unique<mhwsr::QualityGpu>();
-            lock.unlock();const bool prepared=candidate->Prepare(g_ngx,plan,device.Get(),f.packedMotion);lock.lock();
+            lock.unlock();const bool prepared=candidate->Prepare(g_ngx,plan,device.Get(),f.packedMotion,g_gpuTimings);lock.lock();
             if(!prepared){QualityFault("gpu_preparation_failed");return false;}
             if(!g_ready.load()||g_done.load()||g_abort.load())return false;
             g_qualityGpu=candidate.release();
@@ -401,6 +401,17 @@ bool RunQualityTaa(ID3D12GraphicsCommandList* list,const TaaScreenInput& screen)
         return true;
     }catch(...){QualityFault("taa_integration_exception");return false;}
 }
+void BeginQualityTaaTiming(ID3D12GraphicsCommandList* list,const TaaScreenInput& screen) {
+    if(!g_gpuTimings||!QualityObserving()||screen.error)return;QualityBusy busy;
+    try {
+        std::unique_lock<std::mutex> lock(g_qualityMutex);
+        if(!g_qualityGpu||list!=g_qualityList||g_abort.load())return;
+        auto* gpu=g_qualityGpu;const auto phase=g_phase.load();++g_qualityRecorded;
+        lock.unlock();unsigned token=UINT_MAX;
+        {QualityCommands internal;token=gpu->BeginTiming(list,1,phase,{screen.words[10],screen.words[11]});}
+        lock.lock();std::lock_guard<std::mutex> guard(g_bridgeMutex);g_bridgeLists.at(list).qualityTaaTiming=token;
+    }catch(...){QualityFault("taa_timing_exception");}
+}
 bool QualityScale(float& value) {
     std::lock_guard<std::mutex> lock(g_qualityMutex);
     if(!g_qualityGpu||!g_qualityPrimed||g_qualityToneBaselines<3||(kQualityAtNativeInputs&&!g_qualityGpu->NativeInputsReady()))return false;
@@ -409,7 +420,7 @@ bool QualityScale(float& value) {
 bool RunQualityCopy(ID3D12GraphicsCommandList* list,const D3D12_TEXTURE_COPY_LOCATION* dst,UINT x,UINT y,UINT z,const D3D12_TEXTURE_COPY_LOCATION* src,const D3D12_BOX* box) {
     if(!QualityObserving()||!dst||!src)return false;QualityBusy busy;
     try {
-        std::lock_guard<std::mutex> lock(g_qualityMutex);ListTrace state{};
+        std::unique_lock<std::mutex> lock(g_qualityMutex);ListTrace state{};
         {std::lock_guard<std::mutex> guard(g_bridgeMutex);const auto f=g_bridgeLists.find(list);if(f==g_bridgeLists.end())return false;state=f->second;}
         const auto mark=state.quality;
         if(!mark.taa||mark.stage||reinterpret_cast<uintptr_t>(src->pResource)!=mark.taa)return false;
@@ -420,6 +431,11 @@ bool RunQualityCopy(ID3D12GraphicsCommandList* list,const D3D12_TEXTURE_COPY_LOC
             if(mark.sr)QualityFault("sr_handoff_copy_mismatch");return false;
         }
         {std::lock_guard<std::mutex> guard(g_bridgeMutex);auto& q=g_bridgeLists.at(list).quality;q.copy=reinterpret_cast<uintptr_t>(dst->pResource);q.stage=1;}
+        if(g_gpuTimings&&state.qualityTaaTiming!=UINT_MAX&&g_qualityGpu&&list==g_qualityList) {
+            auto* gpu=g_qualityGpu;lock.unlock();
+            {QualityCommands internal;gpu->EndTiming(list,state.qualityTaaTiming);}
+            lock.lock();std::lock_guard<std::mutex> guard(g_bridgeMutex);g_bridgeLists.at(list).qualityTaaTiming=UINT_MAX;
+        }
         if(!mark.sr)return false;
         D3D12_BOX full{0,0,0,state.taaOutput.width,state.taaOutput.height,1};
         g_trackedTextureCopy(list,dst,x,y,z,src,&full);++g_qualityCopies;return true;
@@ -520,7 +536,9 @@ bool RunQualityDraw(ID3D12GraphicsCommandList* list,UINT vertices,UINT instances
                 lock.unlock();NVSDK_NGX_Result result=NVSDK_NGX_Result_FAIL_InvalidParameter;
                 {QualityCommands internal;
                     struct RestoreHost {ID3D12GraphicsCommandList* list;const ListTrace& s;~RestoreHost(){QualityRestoreBindings(list,s);}} restore{list,state};
-                    if(gpu->RecordNativeInputs(list,root,f))result=gpu->Evaluate(f);}
+                    const auto timing=gpu->BeginTiming(list,2,2,f.render);
+                    if(gpu->RecordNativeInputs(list,root,f))result=gpu->Evaluate(f);
+                    gpu->EndTiming(list,timing);}
                 lock.lock();
                 if(!mhwsr::Ok(result)){g_qualityHadHistory=false;QualityFault("native_input_sr_evaluation_failed");
                     Log("{\"event\":\"quality_evaluate_failed\",\"result\":"+std::to_string(unsigned(result))+"}");return false;}
@@ -606,6 +624,24 @@ void PrepareQualityHooks() {
     }
     Log("{\"event\":\"quality_prototype_prepared\",\"new_ngx_context\":false,\"changes_mhwss_mode\":false,\"framegen\":false}");
 }
+void LogQualityTimings(mhwsr::QualityGpu* gpu,ID3D12CommandQueue* queue) {
+    if(!g_gpuTimings)return;
+    UINT64 frequency=0;std::vector<mhwsr::QualityTiming> samples;
+    if(!queue||FAILED(queue->GetTimestampFrequency(&frequency))||!gpu->ReadTimings(frequency,samples)) {
+        Log("{\"event\":\"quality_gpu_timings_unavailable\"}");return;
+    }
+    std::map<std::tuple<unsigned,unsigned,unsigned,unsigned>,std::vector<double>> groups;
+    for(const auto& s:samples)groups[{s.kind,s.phase,s.input.width,s.input.height}].push_back(s.milliseconds);
+    for(auto& pair:groups) {
+        auto& values=pair.second;std::sort(values.begin(),values.end());double total=0;for(auto v:values)total+=v;
+        const auto n=values.size();std::ostringstream out;out<<std::setprecision(9);
+        out<<"{\"event\":\"quality_gpu_timing\",\"scope\":\""<<(std::get<0>(pair.first)==1?"native_taa_to_copy":"sr_inputs_evaluate_copy")
+            <<"\",\"phase\":"<<std::get<1>(pair.first)<<",\"input\":["<<std::get<2>(pair.first)<<','<<std::get<3>(pair.first)
+            <<"],\"samples\":"<<n<<",\"mean_ms\":"<<total/double(n)<<",\"median_ms\":"<<(values[(n-1)/2]+values[n/2])*0.5
+            <<",\"p95_ms\":"<<values[(n-1)*95/100]<<",\"queue_frequency\":"<<frequency<<",\"whole_frame_gpu_time\":false}";
+        Log(out.str());
+    }
+}
 void FinishQuality() {
     // Hooks remain available while draining. No GPU timeout permits a release.
     const auto deadline=GetTickCount64()+5000;bool released=false;
@@ -617,7 +653,8 @@ void FinishQuality() {
                 if(g_qualityRetain)break;
                 const auto completed=g_qualityGpu->Fence()->GetCompletedValue();
                 if(!g_qualityBusy.load()&&g_qualityRecorded==g_qualitySubmitted&&completed!=UINT64_MAX&&completed>=g_qualityFenceValue) {
-                    auto* retiring=g_qualityGpu;g_qualityGpu=nullptr;lock.unlock();
+                    auto* retiring=g_qualityGpu;const auto queue=g_qualityQueue;g_qualityGpu=nullptr;lock.unlock();
+                    LogQualityTimings(retiring,queue.Get());
                     if(retiring->ReleaseAfterGpu()){delete retiring;released=true;}
                     else {lock.lock();g_qualityGpu=retiring;g_qualityRetain=true;}
                     break;

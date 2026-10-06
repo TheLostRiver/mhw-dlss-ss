@@ -2,6 +2,8 @@
 #include "SrParameterAdapter.h"
 #include <wrl/client.h>
 #include <cstdint>
+#include <array>
+#include <vector>
 
 namespace mhwsr {
 // One bounded Quality session on the host's already initialized NGX dispatch.
@@ -14,6 +16,7 @@ struct QualityFrame {
     float jitter[2]{},previousJitter[2]{};
     bool associated=false,reset=true,depthIsRaster=false,nativeInputs=false;
 };
+struct QualityTiming {unsigned kind=0,phase=0;Size input{};double milliseconds=0;};
 class QualityGpu {
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
     Dispatch api_{};
@@ -30,6 +33,12 @@ class QualityGpu {
     unsigned char* nativeConstantsMapped_{};
     unsigned nativeConstantSlots_=0;
     static constexpr unsigned kNativeConstantSlotCount=4096;
+    static constexpr unsigned kTimingSamples=8192;
+    struct TimingRecord {unsigned kind=0,phase=0;Size input{};bool resolved=false;};
+    std::array<TimingRecord,kTimingSamples> timingRecords_{};
+    unsigned timingCount_=0;
+    Ptr<ID3D12QueryHeap> timingQueries_;
+    Ptr<ID3D12Resource> timingReadback_;
     Ptr<ID3D12Fence> fence_;
     NVSDK_NGX_Parameter* params_{};
     NVSDK_NGX_Handle* feature_{};
@@ -46,7 +55,12 @@ public:
     ~QualityGpu();
     // Preparation only creates CPU objects/resources. Prime/Evaluate mark them as
     // potentially GPU-referenced BEFORE CreateFeature, including failed calls.
-    bool Prepare(const Dispatch&,const Plan&,ID3D12Device*,ID3D12Resource* packed);
+    bool Prepare(const Dispatch&,const Plan&,ID3D12Device*,ID3D12Resource* packed,bool timings=false);
+    // Unique query pairs for this bounded session; never resolve an unfinished pair.
+    unsigned BeginTiming(ID3D12GraphicsCommandList*,unsigned kind,unsigned phase,Size input);
+    void EndTiming(ID3D12GraphicsCommandList*,unsigned token);
+    // Only after the same last-use fence required by ReleaseAfterGpu completes.
+    bool ReadTimings(UINT64 frequency,std::vector<QualityTiming>&);
     NVSDK_NGX_Result Prime(ID3D12GraphicsCommandList*);
     bool CaptureRasterDepth(ID3D12GraphicsCommandList*,ID3D12Resource*,D3D12_RESOURCE_STATES);
     bool PrepareNativeInputs(ID3D12RootSignature*);
