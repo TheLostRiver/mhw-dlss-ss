@@ -133,7 +133,7 @@ Result pixel(float4 position : SV_POSITION) {
     auto at=nativeRtvs_->GetCPUDescriptorHandleForHeapStart();device_->CreateRenderTargetView(motion_.Get(),nullptr,at);at.ptr+=nativeRtvStride_;
     device_->CreateRenderTargetView(depth_.Get(),nullptr,at);
     D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_UPLOAD;
-    D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=4096*256;buffer.Height=1;
+    D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=UINT64(kNativeConstantSlotCount)*256;buffer.Height=1;
     buffer.DepthOrArraySize=1;buffer.MipLevels=1;buffer.SampleDesc.Count=1;buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     if(FAILED(device_->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&nativeConstants_))))return false;
     D3D12_RANGE noRead{0,0};void* mapped=nullptr;
@@ -142,7 +142,7 @@ Result pixel(float4 position : SV_POSITION) {
 }
 bool QualityGpu::RecordNativeInputs(ID3D12GraphicsCommandList* list,ID3D12RootSignature* root,const QualityFrame& frame) {
     const auto active=frame.render;
-    if(!nativePreparePso_||nativeRoot_.Get()!=root||!Inside(active,plan_.minimum,plan_.maximum)||!nativeConstantsMapped_||nativeConstantSlots_>=4096)return false;
+    if(!nativePreparePso_||nativeRoot_.Get()!=root||!Inside(active,plan_.minimum,plan_.maximum)||!nativeConstantsMapped_||!NativeInputBudgetAvailable())return false;
     referenced_=true;
     // Every evaluation receives a fresh 256-byte slot. None is overwritten
     // while this bounded session's GPU commands may still reference it.

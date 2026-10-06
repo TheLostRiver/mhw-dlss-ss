@@ -507,6 +507,9 @@ bool RunQualityDraw(ID3D12GraphicsCommandList* list,UINT vertices,UINT instances
                         <<",\"intervening_dispatches\":"<<state.postTaaDispatches<<",\"input\":["<<f.render.width<<','<<f.render.height<<"]}";Log(out.str());}
                     return false;}
                 if(std::fabs(f.jitter[0])+std::fabs(f.jitter[1])<0.00000001f){QualityWait("nonzero_projection_jitter");return false;}
+                // Do not recycle upload slots or silently run beyond the bounded
+                // session at unusually high frame rates. Restore before exhaustion.
+                if(!gpu->NativeInputBudgetAvailable()){QualityFault("immutable_frame_budget_exhausted");return false;}
                 // A is the verified native render target for this exact draw.
                 // Its raw pre-TAA contents survive the T -> B copy, so sampling A
                 // here does not stack TAA/DLAA onto the SR input.

@@ -53,6 +53,9 @@ bool g_gameHooks=true;
 bool g_tracePostTaa=false;
 bool g_pulseJitter=false;
 bool g_traceTextures=false;
+unsigned g_windowMs=3000;
+bool g_windowSounds=false;
+std::atomic<uint64_t> g_windowDeadline{0};
 std::atomic<bool> g_jitterChanged{false};
 bool EnableJitterPulse();
 bool JitterPulseStillOwned();
@@ -67,7 +70,8 @@ void FinishBridge();
 uint64_t g_phaseStart=0;
 float g_original=1, g_expected=1, g_restoreExpected=1;
 unsigned g_width=0, g_height=0;
-bool g_targetObserved=false, g_restoreObserved=false;
+bool g_targetObserved=false;
+std::atomic<bool> g_restoreObserved{false};
 
 void Log(const std::string& line) noexcept {
     try { std::lock_guard<std::mutex> lock(g_logMutex); if(g_log){g_log<<line<<'\n';g_log.flush();} } catch(...){}
@@ -127,14 +131,14 @@ void __fastcall OnUpdate(void* object) {
             if(g_qualityMode&&!QualityScale(requested))return;
             if(!EnableJitterPulse()){Log("{\"event\":\"jitter_pulse_refused\",\"changes_scale\":false}");g_done.store(true);return;}
             g_setter(object,requested,true);
-            g_expected=Value(object,0x1f0);g_changed.store(true);g_phase.store(2);g_phaseStart=now;
+            g_expected=Value(object,0x1f0);g_changed.store(true);g_windowDeadline.store(now+g_windowMs);g_phase.store(2);g_phaseStart=now;
             Snapshot("target_requested",object);return;
         }
         if(phase==2) {
             if(!JitterPulseStillOwned()){Restore(object,"external_jitter_mode_change");return;}
             if(!Near(Value(object,0x1f0),g_expected)) {Restore(object,"external_scale_change");return;}
             if(!g_targetObserved&&Near(Value(object,0x1f4),g_expected)) {g_targetObserved=true;Snapshot("target_active",object);}
-            if(now-g_phaseStart>=3000) Restore(object,"window_complete");
+            if(now>=g_windowDeadline.load()) Restore(object,"window_complete");
             return;
         }
         if(phase==3) {
@@ -294,6 +298,9 @@ void ReadBridgeConfiguration(const std::filesystem::path& ini) {
     g_pulseJitter=GetPrivateProfileIntW(L"Experiment",L"PulseJitter",0,ini.c_str())!=0;
     g_traceTextures=GetPrivateProfileIntW(L"Experiment",L"TraceTextures",0,ini.c_str())!=0;
     g_qualityMode=GetPrivateProfileIntW(L"Experiment",L"QualityPrototype",0,ini.c_str())==1;
+    g_windowMs=GetPrivateProfileIntW(L"Experiment",L"WindowMs",g_qualityMode?10000:3000,ini.c_str());
+    if(g_windowMs<1000||g_windowMs>10000)throw std::runtime_error("WindowMs must be between 1000 and 10000; this is a bounded session");
+    g_windowSounds=g_qualityMode&&GetPrivateProfileIntW(L"Experiment",L"WindowSounds",0,ini.c_str())==1;
     if(g_qualityMode&&(!g_traceTextures||!g_tracePostTaa||!g_gameHooks||!g_applyScalePulse||!g_pulseJitter||!g_requireFrameGenOff))
         throw std::runtime_error("Quality prototype requires all input/graph guards, jitter, scale pulse and FrameGen-off");
     if(g_traceTextures&&(!g_gameHooks||!g_tracePostTaa))throw std::runtime_error("Texture tracing requires game and post-TAA hooks");
@@ -302,7 +309,8 @@ void ReadBridgeConfiguration(const std::filesystem::path& ini) {
     Log("{\"event\":\"bridge_configuration\",\"version\":3,\"expected_proxy_sha256\":\""+g_expectedProxyHash+
         "\",\"requires_framegen_off\":"+(g_requireFrameGenOff?"true":"false")+",\"applies_scale_pulse\":"+(g_applyScalePulse?"true":"false")+
         ",\"game_hooks\":"+(g_gameHooks?"true":"false")+",\"trace_post_taa\":"+(g_tracePostTaa?"true":"false")+
-        ",\"pulses_projection_jitter\":"+(g_pulseJitter?"true":"false")+",\"traces_textures\":"+(g_traceTextures?"true":"false")+"}");
+        ",\"pulses_projection_jitter\":"+(g_pulseJitter?"true":"false")+",\"traces_textures\":"+(g_traceTextures?"true":"false")+
+        ",\"target_window_ms\":"+std::to_string(g_windowMs)+",\"window_sounds\":"+(g_windowSounds?"true":"false")+"}");
 }
 void Stop() noexcept {
     g_ready.store(false);bool restored=true;
@@ -361,17 +369,38 @@ DWORD WINAPI Worker(void*) {
             if(WaitForSingleObject(controls[0],0)==WAIT_OBJECT_0||GetPrivateProfileIntW(L"Experiment",L"Enabled",0,ini.c_str())!=1)throw std::runtime_error("Cancelled before change");
             Sleep(250);
         }
-        Install();const auto started=GetTickCount64();bool timeoutReported=false;
+        Install();const auto started=GetTickCount64();bool timeoutReported=false,qualityAnnounced=false,restoreAnnounced=false;
+        uint64_t lastWindowReport=0;
         while(!g_done.load()) {
             Sleep(100);
             if(WaitForSingleObject(controls[0],0)==WAIT_OBJECT_0)g_abort.store(true);
             if(Setting(graphics,"ResolutionScaling")!="High"||Setting(graphics,"DirectX12Enable")!="On"||
                Setting(mhwss,"Upscaler")!="None"||!FrameGenDisabled(optiscaler)||!QualityConfiguration(graphics,optiscaler)||
                GetPrivateProfileIntW(L"Experiment",L"Enabled",0,ini.c_str())!=1)g_abort.store(true);
+            // Cues and progress follow completed SR output commands, never just
+            // a requested scale change. Audio runs on this worker, not a render hook.
+            const auto now=GetTickCount64();
+            if(g_qualityMode) {
+                const auto frames=g_qualityFinalDraws.load(),deadline=g_windowDeadline.load();
+                if(frames&&g_phase.load()==2&&!g_abort.load()&&now<deadline) {
+                    if(now-lastWindowReport>=1000) {
+                        Log("{\"event\":\"quality_window_status\",\"state\":\"quality\",\"tick_ms\":"+std::to_string(now)+
+                            ",\"remaining_ms\":"+std::to_string(deadline-now)+",\"full_final_draws\":"+std::to_string(frames)+"}");
+                        lastWindowReport=now;
+                    }
+                    if(!qualityAnnounced){qualityAnnounced=true;if(g_windowSounds)Beep(880,120);}
+                }
+                if(g_restoreObserved.load()&&!restoreAnnounced) {
+                    restoreAnnounced=true;
+                    Log("{\"event\":\"quality_window_status\",\"state\":\"restored\",\"tick_ms\":"+std::to_string(now)+
+                        ",\"active_scale\":"+std::to_string(g_restoreExpected)+",\"full_final_draws\":"+std::to_string(frames)+"}");
+                    if(g_windowSounds&&qualityAnnounced)Beep(440,200);
+                }
+            }
             if(!g_gameHooks&&(g_abort.load()||GetTickCount64()-started>=5000)) {
                 Log("{\"event\":\"input_capture_complete\",\"changes_scale\":false}");g_done.store(true);break;
             }
-            if(GetTickCount64()-started>20000) {
+            if(GetTickCount64()-started>17000+g_windowMs) {
                 g_abort.store(true);
                 if(!g_changed.load()&&g_phase.load()<2)break;
                 if(!timeoutReported){Log("{\"event\":\"awaiting_render_thread_restoration\"}");timeoutReported=true;}

@@ -29,6 +29,7 @@ class QualityGpu {
     Ptr<ID3D12Resource> nativeConstants_;
     unsigned char* nativeConstantsMapped_{};
     unsigned nativeConstantSlots_=0;
+    static constexpr unsigned kNativeConstantSlotCount=4096;
     Ptr<ID3D12Fence> fence_;
     NVSDK_NGX_Parameter* params_{};
     NVSDK_NGX_Handle* feature_{};
@@ -50,6 +51,7 @@ public:
     bool CaptureRasterDepth(ID3D12GraphicsCommandList*,ID3D12Resource*,D3D12_RESOURCE_STATES);
     bool PrepareNativeInputs(ID3D12RootSignature*);
     bool NativeInputsReady()const{return nativePreparePso_!=nullptr;}
+    bool NativeInputBudgetAvailable()const{return nativeConstantSlots_<kNativeConstantSlotCount;}
     bool RecordNativeInputs(ID3D12GraphicsCommandList*,ID3D12RootSignature*,const QualityFrame&);
     NVSDK_NGX_Result Evaluate(const QualityFrame&);
     bool Matches(ID3D12Resource* packed)const{return packed_.Get()==packed;}
