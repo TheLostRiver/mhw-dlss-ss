@@ -106,7 +106,20 @@ target_compile_options(MhwSrBridge PRIVATE /W4 /permissive- /guard:cf /utf-8)
 target_link_options(MhwSrBridge PRIVATE /guard:cf /DYNAMICBASE /NXCOMPAT /MAP)
 target_link_libraries(MhwSrBridge PRIVATE bcrypt minhook d3d12 d3dcompiler)
 
-foreach(target MhwSrProbe MhwViewportProbe MhwTextureProbe MhwPassProbe MhwScreenProbe MhwScalePilot MhwQuadPilot MhwSrBridge)
+add_library(MhwNativeHost SHARED ../standalone/MhwNativeHost.cpp)
+target_compile_features(MhwNativeHost PRIVATE cxx_std_17)
+target_compile_definitions(MhwNativeHost PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(MhwNativeHost PRIVATE /W4 /permissive- /guard:cf /utf-8)
+target_link_options(MhwNativeHost PRIVATE /guard:cf /DYNAMICBASE /NXCOMPAT)
+target_link_libraries(MhwNativeHost PRIVATE bcrypt minhook user32)
+add_executable(MhwSrLauncher WIN32 ../standalone/MhwSrLauncher.cpp)
+target_compile_features(MhwSrLauncher PRIVATE cxx_std_17)
+target_compile_definitions(MhwSrLauncher PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(MhwSrLauncher PRIVATE /W4 /permissive- /guard:cf /utf-8)
+target_link_options(MhwSrLauncher PRIVATE /guard:cf /DYNAMICBASE /NXCOMPAT)
+target_link_libraries(MhwSrLauncher PRIVATE bcrypt user32)
+
+foreach(target MhwSrProbe MhwViewportProbe MhwTextureProbe MhwPassProbe MhwScreenProbe MhwScalePilot MhwQuadPilot MhwSrBridge MhwNativeHost)
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE-Minhook.txt" "$<TARGET_FILE_DIR:${target}>/LICENSE-Minhook.txt")

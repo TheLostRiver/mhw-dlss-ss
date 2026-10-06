@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--pattern", default=r"InlGetJitter|Proj jitter|SubmitPostTAACommands|GetJitter|Creating DLSS feature|DLSSGetRenderScale")
     parser.add_argument("--functions", nargs="*", type=lambda value: int(value, 0), default=[])
     parser.add_argument("--targets", nargs="*", type=lambda value: int(value, 0), default=[])
+    parser.add_argument("--imports", nargs="*", default=[], help="Also trace RIP-relative calls/references to these import names.")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     for destination in (args.output, args.output.with_suffix(".json")):
@@ -46,6 +47,18 @@ def main() -> None:
     for rva in args.targets:
         wanted[rva] = strings.get(rva, f"data target {rva:#x}")
         strings.setdefault(rva, wanted[rva])
+    requested_imports = set(args.imports)
+    found_imports = set()
+    for library in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []):
+        for item in library.imports:
+            name = item.name.decode("ascii", "replace") if item.name else f"ordinal:{item.ordinal}"
+            if name in requested_imports:
+                rva = item.address - base
+                wanted[rva] = f"IAT {library.dll.decode('ascii', 'replace')}!{name}"
+                strings[rva] = wanted[rva]
+                found_imports.add(name)
+    if requested_imports - found_imports:
+        parser.error("Imports not found: " + ", ".join(sorted(requested_imports - found_imports)))
     disassembler = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
     disassembler.skipdata = True
     rip = re.compile(r"\[rip ([+-]) (0x[0-9a-f]+|[0-9]+)\]")

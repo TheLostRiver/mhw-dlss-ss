@@ -49,7 +49,8 @@ int wmain(int argc, wchar_t** argv) {
     };
     if (!method("Reset", list.Get(), 10) || !method("ResourceBarrier", list.Get(), 26) ||
         !method("ExecuteCommandLists", queue.Get(), 10)) return 1;
-    if (!method("CreateGraphicsPipelineState", device.Get(), 10) || !method("CreateComputePipelineState", device.Get(), 11) ||
+    if (!method("CreateCommittedResource", device.Get(), 27) ||
+        !method("CreateGraphicsPipelineState", device.Get(), 10) || !method("CreateComputePipelineState", device.Get(), 11) ||
         !method("CreateRootSignature", device.Get(), 16) || !method("CreateConstantBufferView", device.Get(), 17) || !method("CreateShaderResourceView", device.Get(), 18) ||
         !method("CreateUnorderedAccessView", device.Get(), 19) || !method("CreateRenderTargetView", device.Get(), 20) ||
         !method("CopyDescriptors", device.Get(), 23) || !method("CopyDescriptorsSimple", device.Get(), 24) ||
@@ -62,6 +63,12 @@ int wmain(int argc, wchar_t** argv) {
         !method("SetComputeRoot32BitConstants", list.Get(), 35) || !method("SetGraphicsRoot32BitConstants", list.Get(), 36) ||
         !method("SetComputeRootConstantBufferView", list.Get(), 37) || !method("SetGraphicsRootConstantBufferView", list.Get(), 38) ||
         !method("OMSetRenderTargets", list.Get(), 46)) return 1;
+    D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=4096;buffer.Height=1;
+    buffer.DepthOrArraySize=1;buffer.MipLevels=1;buffer.SampleDesc.Count=1;buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> resource;
+    if(FAILED(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&resource)))||
+        !method("GetGPUVirtualAddress",resource.Get(),11))return 1;
     output.close();
     if (!output) return 1;
     std::wcout << L"Adapter: " << description.Description << L"\nWritten: " << argv[2] << L"\n";

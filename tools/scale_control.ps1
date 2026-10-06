@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][int]$GameProcessId,
     [Parameter(Mandatory=$true)][ValidateSet('Start','Cancel')][string]$Action,
-    [ValidateSet('MhwScalePilot','MhwQuadPilot','MhwSrBridge')][string]$Observer = 'MhwScalePilot',
+    [ValidateSet('MhwScalePilot','MhwQuadPilot','MhwSrBridge','MhwNativeHost')][string]$Observer = 'MhwScalePilot',
     [switch]$WaitForForeground,
     [switch]$WaitForF8,
     [ValidateRange(1,300)][int]$ForegroundTimeoutSeconds = 120

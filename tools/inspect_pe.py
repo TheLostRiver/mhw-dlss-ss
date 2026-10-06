@@ -44,9 +44,15 @@ def inspect(path: Path, pattern: str) -> dict:
         "path": str(path.resolve()), "sha256": hashlib.sha256(data).hexdigest(),
         "size": len(data), "image_base": hex(pe.OPTIONAL_HEADER.ImageBase),
         "entrypoint_rva": hex(pe.OPTIONAL_HEADER.AddressOfEntryPoint),
+        "entrypoint_section": next((s.Name.rstrip(b"\0").decode("ascii", "replace") for s in pe.sections
+                                    if s.contains_rva(pe.OPTIONAL_HEADER.AddressOfEntryPoint)), None),
+        "overlay_bytes": len(pe.get_overlay() or b""),
         "sections": [{"name": s.Name.rstrip(b"\0").decode("ascii", "replace"),
                       "rva": hex(s.VirtualAddress), "virtual_size": s.Misc_VirtualSize,
-                      "raw_offset": hex(s.PointerToRawData), "raw_size": s.SizeOfRawData}
+                      "raw_offset": hex(s.PointerToRawData), "raw_size": s.SizeOfRawData,
+                      "entropy": round(s.get_entropy(), 4),
+                      "executable": bool(s.Characteristics & 0x20000000),
+                      "writable": bool(s.Characteristics & 0x80000000)}
                      for s in pe.sections],
         "imports": [{"dll": entry.dll.decode("ascii", "replace"),
                      "names": [item.name.decode("ascii", "replace") if item.name else f"ordinal:{item.ordinal}"
