@@ -29,6 +29,7 @@ uintptr_t g_qualityColor=0,g_qualityCopy=0,g_qualityTone=0,g_qualityFinal=0,g_qu
 unsigned g_qualityToneBaselines=0;
 float g_qualityLastJitter[2]{};bool g_qualityHadHistory=false;
 std::atomic<uint64_t> g_qualityEvaluated{0},g_qualitySucceeded{0},g_qualityCopies{0},g_qualityBlurBypasses{0},g_qualityToneDraws{0},g_qualityFinalDraws{0};
+std::atomic<uint64_t> g_qualityTaaBypasses{0};
 std::atomic<unsigned> g_qualityBusy{0};
 std::map<std::string,uint64_t> g_qualityWaits;
 bool QualityWait(const char* reason){if(g_qualityWaits.size()<32||g_qualityWaits.count(reason))++g_qualityWaits[reason];return false;}
@@ -50,7 +51,7 @@ void InvalidateQualityBindings(ID3D12GraphicsCommandList* list) {
     std::lock_guard<std::mutex> lock(g_qualityMutex);
     std::lock_guard<std::mutex> guard(g_bridgeMutex);
     const auto found=g_bridgeLists.find(list);
-    if(found!=g_bridgeLists.end()&&found->second.quality.sr&&found->second.quality.stage!=4)
+    if(found!=g_bridgeLists.end()&&(found->second.quality.sr||found->second.quality.taaBypassed)&&found->second.quality.stage!=4)
         QualityFault("sr_chain_interrupted_by_state_clear");
 }
 void ResetQualityList(ID3D12GraphicsCommandList* list) {
@@ -295,7 +296,7 @@ bool RunQualityTaa(ID3D12GraphicsCommandList* list,const TaaScreenInput& screen)
         }
         ListTrace state{};
         {std::lock_guard<std::mutex> guard(g_bridgeMutex);state=g_bridgeLists.at(list);g_bridgeLists.at(list).quality={};}
-        if(state.quality.sr&&state.quality.stage!=4)QualityFault("previous_sr_postprocess_chain_incomplete");
+        if((state.quality.sr||state.quality.taaBypassed)&&state.quality.stage!=4)QualityFault("previous_sr_postprocess_chain_incomplete");
         if(screen.error||!screen.cameraValid||!state.generation||!state.textures.heapCount||!state.textures.compute.signature)return QualityWait("frame_association");
         const mhwsr::Size output{unsigned(ScreenFloat(screen,16)),unsigned(ScreenFloat(screen,20))},input{screen.words[10],screen.words[11]};
         if(kQualityAtNativeInputs) {
@@ -305,9 +306,24 @@ bool RunQualityTaa(ID3D12GraphicsCommandList* list,const TaaScreenInput& screen)
             candidate.packedMotion=reinterpret_cast<ID3D12Resource*>(mv);candidate.taaOutput=reinterpret_cast<ID3D12Resource*>(out);candidate.render=input;
             memcpy(candidate.jitter,screen.jitter,8);memcpy(candidate.previousJitter,screen.previousJitter,8);
             {std::lock_guard<std::mutex> guard(g_bridgeMutex);auto& s=g_bridgeLists.at(list);s.quality={c,out,0,0,0,false};s.qualityCandidate=candidate;s.qualityCamera=screen.camera;s.qualityScreen=screen.screen;}
-            // Native TAA is retained as an immediate fallback. Its output is not
-            // fed into SR: the raw color remains intact until the first blur draw.
-            if(g_qualityGpu)return false;
+            // SR always consumes raw A. Once a complete low-resolution SR chain
+            // has succeeded, keep a cheap raw-color fallback in T and skip TAA.
+            if(g_qualityGpu) {
+                if(!g_bypassNativeTaa||g_abort.load()||g_phase.load()!=2||!g_qualityHadHistory||!g_qualityLowChain||
+                   list!=g_qualityList||c!=g_qualityColor||!g_qualityGpu->NativeInputsReady()||!g_qualityGpu->Matches(candidate.packedMotion)||
+                   input.width!=g_qualityPlan.aligned.width||input.height!=g_qualityPlan.aligned.height||
+                   output.width!=g_qualityPlan.output.width||output.height!=g_qualityPlan.output.height||
+                   !JitterPulseStillOwned()||std::fabs(screen.jitter[0])+std::fabs(screen.jitter[1])<0.00000001f)return false;
+                if(!QualityState(list,candidate.color,candidate.colorState)||!QualityState(list,candidate.taaOutput,candidate.outputState))
+                    return QualityWait("raw_taa_fallback_barrier_state");
+                auto* gpu=g_qualityGpu;++g_qualityRecorded;lock.unlock();bool staged=false;
+                {QualityCommands internal;const auto timing=gpu->BeginTiming(list,3,2,input);
+                    staged=gpu->StageRawTaaFallback(candidate);gpu->EndTiming(list,timing);}
+                lock.lock();if(!staged){QualityFault("raw_taa_fallback_failed");return false;}
+                {std::lock_guard<std::mutex> guard(g_bridgeMutex);g_bridgeLists.at(list).quality.taaBypassed=true;}
+                if(++g_qualityTaaBypasses==1)Log("{\"event\":\"quality_native_taa_bypass_started\",\"source_color_before_taa\":true,\"fallback\":\"current_raw_color_roi\",\"game_taa_setting_preserved\":true}");
+                return true;
+            }
         }
         const bool preparedDepth=state.preparedDepth.sequence&&state.preparedDepth.generation==state.generation;
         const bool copied=state.qualityDepth.sequence>state.lastQualityDepth&&state.qualityDepth.generation==state.generation&&
@@ -401,14 +417,14 @@ bool RunQualityTaa(ID3D12GraphicsCommandList* list,const TaaScreenInput& screen)
         return true;
     }catch(...){QualityFault("taa_integration_exception");return false;}
 }
-void BeginQualityTaaTiming(ID3D12GraphicsCommandList* list,const TaaScreenInput& screen) {
+void BeginQualityTaaTiming(ID3D12GraphicsCommandList* list,const TaaScreenInput& screen,bool bypassed) {
     if(!g_gpuTimings||!QualityObserving()||screen.error)return;QualityBusy busy;
     try {
         std::unique_lock<std::mutex> lock(g_qualityMutex);
         if(!g_qualityGpu||list!=g_qualityList||g_abort.load())return;
         auto* gpu=g_qualityGpu;const auto phase=g_phase.load();++g_qualityRecorded;
         lock.unlock();unsigned token=UINT_MAX;
-        {QualityCommands internal;token=gpu->BeginTiming(list,1,phase,{screen.words[10],screen.words[11]});}
+        {QualityCommands internal;token=gpu->BeginTiming(list,bypassed?4:1,phase,{screen.words[10],screen.words[11]});}
         lock.lock();std::lock_guard<std::mutex> guard(g_bridgeMutex);g_bridgeLists.at(list).qualityTaaTiming=token;
     }catch(...){QualityFault("taa_timing_exception");}
 }
@@ -428,7 +444,7 @@ bool RunQualityCopy(ID3D12GraphicsCommandList* list,const D3D12_TEXTURE_COPY_LOC
             !dst->SubresourceIndex&&!src->SubresourceIndex&&!box->left&&!box->top&&!box->front&&box->back==1&&
             box->right==state.taaInput.width&&box->bottom==state.taaInput.height&&QualityTexture(reinterpret_cast<uintptr_t>(dst->pResource),state.taaOutput,DXGI_FORMAT_R11G11B10_FLOAT);
         if(!valid||(mark.sr&&reinterpret_cast<uintptr_t>(dst->pResource)!=g_qualityCopy)) {
-            if(mark.sr)QualityFault("sr_handoff_copy_mismatch");return false;
+            if(mark.sr||mark.taaBypassed)QualityFault("sr_handoff_copy_mismatch");return false;
         }
         {std::lock_guard<std::mutex> guard(g_bridgeMutex);auto& q=g_bridgeLists.at(list).quality;q.copy=reinterpret_cast<uintptr_t>(dst->pResource);q.stage=1;}
         if(g_gpuTimings&&state.qualityTaaTiming!=UINT_MAX&&g_qualityGpu&&list==g_qualityList) {
@@ -487,7 +503,7 @@ bool RunQualityDraw(ID3D12GraphicsCommandList* list,UINT vertices,UINT instances
             source==(role==1?q.copy:role==2?q.color:q.tone)&&target!=source&&
             (role!=1||target==q.color)&&(role!=3||low);
         if(!chain){
-            if(q.sr)QualityFault("sr_postprocess_contract_mismatch");
+            if(q.sr||q.taaBypassed)QualityFault("sr_postprocess_contract_mismatch");
             else if(role) {
                 const auto reason=!geometry?"postprocess_vertices":!topology?"postprocess_topology":!sized?"postprocess_rect":!textures?"postprocess_texture":"postprocess_order";
                 QualityWait(reason);
@@ -521,7 +537,7 @@ bool RunQualityDraw(ID3D12GraphicsCommandList* list,UINT vertices,UINT instances
                     if(g_qualityWaits["native_input_frame_scope"]==1){std::ostringstream out;out<<"{\"event\":\"quality_native_scope_rejected\",\"color_matches_target\":"<<(f.color==reinterpret_cast<ID3D12Resource*>(target)?"true":"false")
                         <<",\"motion_matches\":"<<(motion==reinterpret_cast<uintptr_t>(f.packedMotion)?"true":"false")<<",\"depth_matches\":"<<(depth==g_qualityDepth?"true":"false")
                         <<",\"intervening_dispatches\":"<<state.postTaaDispatches<<",\"input\":["<<f.render.width<<','<<f.render.height<<"]}";Log(out.str());}
-                    return false;}
+                    if(q.taaBypassed)QualityFault("native_input_frame_scope_after_taa_bypass");return false;}
                 if(std::fabs(f.jitter[0])+std::fabs(f.jitter[1])<0.00000001f){QualityWait("nonzero_projection_jitter");return false;}
                 // Do not recycle upload slots or silently run beyond the bounded
                 // session at unusually high frame rates. Restore before exhaustion.
@@ -635,7 +651,9 @@ void LogQualityTimings(mhwsr::QualityGpu* gpu,ID3D12CommandQueue* queue) {
     for(auto& pair:groups) {
         auto& values=pair.second;std::sort(values.begin(),values.end());double total=0;for(auto v:values)total+=v;
         const auto n=values.size();std::ostringstream out;out<<std::setprecision(9);
-        out<<"{\"event\":\"quality_gpu_timing\",\"scope\":\""<<(std::get<0>(pair.first)==1?"native_taa_to_copy":"sr_inputs_evaluate_copy")
+        const auto kind=std::get<0>(pair.first);
+        const auto* scope=kind==1?"native_taa_to_copy":kind==2?"sr_inputs_evaluate_copy":kind==3?"raw_taa_fallback_copy":"taa_bypass_to_copy";
+        out<<"{\"event\":\"quality_gpu_timing\",\"scope\":\""<<scope
             <<"\",\"phase\":"<<std::get<1>(pair.first)<<",\"input\":["<<std::get<2>(pair.first)<<','<<std::get<3>(pair.first)
             <<"],\"samples\":"<<n<<",\"mean_ms\":"<<total/double(n)<<",\"median_ms\":"<<(values[(n-1)/2]+values[n/2])*0.5
             <<",\"p95_ms\":"<<values[(n-1)*95/100]<<",\"queue_frequency\":"<<frequency<<",\"whole_frame_gpu_time\":false}";
@@ -664,6 +682,7 @@ void FinishQuality() {
         Sleep(25);
     }
     Log("{\"event\":\"quality_summary\",\"evaluated\":"+std::to_string(g_qualityEvaluated.load())+",\"successful\":"+std::to_string(g_qualitySucceeded.load())+
+        ",\"native_taa_bypasses\":"+std::to_string(g_qualityTaaBypasses.load())+
         ",\"expanded_copies\":"+std::to_string(g_qualityCopies.load())+",\"blur_bypasses\":"+std::to_string(g_qualityBlurBypasses.load())+
         ",\"full_tone_draws\":"+std::to_string(g_qualityToneDraws.load())+",\"full_final_draws\":"+std::to_string(g_qualityFinalDraws.load())+
         ",\"depth_copy_associations\":"+std::to_string(g_qualityDepthCopyAssociations)+",\"prepared_depth_associations\":"+std::to_string(g_qualityPreparedDepthAssociations)+

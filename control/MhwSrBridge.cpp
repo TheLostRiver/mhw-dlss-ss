@@ -57,6 +57,7 @@ bool g_traceTextures=false;
 unsigned g_windowMs=3000;
 bool g_windowSounds=false;
 bool g_verboseDiagnostics=true,g_gpuTimings=false;
+bool g_bypassNativeTaa=false;
 bool VerboseDiagnostics(){return !g_qualityMode||g_verboseDiagnostics;}
 std::atomic<uint64_t> g_windowDeadline{0};
 std::atomic<bool> g_jitterChanged{false};
@@ -306,6 +307,7 @@ void ReadBridgeConfiguration(const std::filesystem::path& ini) {
     g_windowSounds=g_qualityMode&&GetPrivateProfileIntW(L"Experiment",L"WindowSounds",0,ini.c_str())==1;
     g_verboseDiagnostics=GetPrivateProfileIntW(L"Experiment",L"VerboseDiagnostics",1,ini.c_str())!=0;
     g_gpuTimings=g_qualityMode&&GetPrivateProfileIntW(L"Experiment",L"GpuTimings",0,ini.c_str())==1;
+    g_bypassNativeTaa=g_qualityMode&&GetPrivateProfileIntW(L"Experiment",L"BypassNativeTaa",0,ini.c_str())==1;
     if(g_qualityMode&&(!g_traceTextures||!g_tracePostTaa||!g_gameHooks||!g_applyScalePulse||!g_pulseJitter||!g_requireFrameGenOff))
         throw std::runtime_error("Quality prototype requires all input/graph guards, jitter, scale pulse and FrameGen-off");
     if(g_traceTextures&&(!g_gameHooks||!g_tracePostTaa))throw std::runtime_error("Texture tracing requires game and post-TAA hooks");
@@ -316,7 +318,8 @@ void ReadBridgeConfiguration(const std::filesystem::path& ini) {
         ",\"game_hooks\":"+(g_gameHooks?"true":"false")+",\"trace_post_taa\":"+(g_tracePostTaa?"true":"false")+
         ",\"pulses_projection_jitter\":"+(g_pulseJitter?"true":"false")+",\"traces_textures\":"+(g_traceTextures?"true":"false")+
         ",\"target_window_ms\":"+std::to_string(g_windowMs)+",\"window_sounds\":"+(g_windowSounds?"true":"false")+
-        ",\"verbose_diagnostics\":"+(g_verboseDiagnostics?"true":"false")+",\"gpu_timings\":"+(g_gpuTimings?"true":"false")+"}");
+        ",\"verbose_diagnostics\":"+(g_verboseDiagnostics?"true":"false")+",\"gpu_timings\":"+(g_gpuTimings?"true":"false")+
+        ",\"bypass_native_taa\":"+(g_bypassNativeTaa?"true":"false")+"}");
 }
 void Stop() noexcept {
     g_ready.store(false);bool restored=true;

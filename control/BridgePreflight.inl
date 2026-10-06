@@ -13,7 +13,7 @@ struct TextureHeap {UINT64 gpu=0,cpu=0;unsigned count=0,stride=0;};
 struct TextureRoots {uintptr_t signature=0;std::array<UINT64,32> tables{},cbvs{};};
 struct TextureList {TextureHeap heap{};TextureRoots compute{},graphics{};std::array<UINT64,8> targets{};unsigned targetCount=0;
     std::array<ID3D12DescriptorHeap*,2> heaps{};unsigned heapCount=0;uintptr_t depthResource=0;UINT64 depthHandle=0;};
-struct QualityMark {uintptr_t color=0,taa=0,copy=0,tone=0;unsigned stage=0;bool sr=false;};
+struct QualityMark {uintptr_t color=0,taa=0,copy=0,tone=0;unsigned stage=0;bool sr=false,taaBypassed=false;};
 struct QualityDepthWrite {uintptr_t source=0,destination=0;unsigned width=0,height=0;uint64_t generation=0,sequence=0;};
 struct QualitySceneDepth {uintptr_t resource=0,gbuffer=0;unsigned width=0,height=0;uint64_t generation=0,sequence=0;};
 struct PreparedDepthTrace {uintptr_t source=0,prepared=0;unsigned width=0,height=0,format=0;uint64_t generation=0,sequence=0;};
@@ -198,7 +198,7 @@ bool __fastcall OnMhwDispatch(void* self,ID3D12GraphicsCommandList* list,UINT x,
     TaaScreenInput screen{};
     if(matched)screen=ReadTaaScreen(list);
     const bool quality=matched&&g_qualityMode&&RunQualityTaa(list,screen);
-    if(matched&&g_qualityMode&&!quality)BeginQualityTaaTiming(list,screen);
+    if(matched&&g_qualityMode)BeginQualityTaaTiming(list,screen,quality);
     const auto mhwssResult=g_dispatchCallback(self,list,x,y,z);
     const bool result=mhwssResult||quality;
     if((g_ready.load()&&!g_qualityCommands)&&!g_done.load()&&g_sceneInvocation.serial&&g_sceneInvocation.inputObserved)try {

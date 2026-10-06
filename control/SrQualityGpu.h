@@ -67,6 +67,7 @@ public:
     bool NativeInputsReady()const{return nativePreparePso_!=nullptr;}
     bool NativeInputBudgetAvailable()const{return nativeConstantSlots_<kNativeConstantSlotCount;}
     bool RecordNativeInputs(ID3D12GraphicsCommandList*,ID3D12RootSignature*,const QualityFrame&);
+    bool StageRawTaaFallback(const QualityFrame&);
     NVSDK_NGX_Result Evaluate(const QualityFrame&);
     bool Matches(ID3D12Resource* packed)const{return packed_.Get()==packed;}
     bool Referenced()const{return referenced_;}

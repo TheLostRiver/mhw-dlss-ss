@@ -182,6 +182,21 @@ bool QualityGpu::CaptureRasterDepth(ID3D12GraphicsCommandList* list,ID3D12Resour
     Transition(list,depth_.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     depthState_=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;return true;
 }
+bool QualityGpu::StageRawTaaFallback(const QualityFrame& f) {
+    if(!f.list||f.color==f.taaOutput||f.render.width!=plan_.aligned.width||f.render.height!=plan_.aligned.height||
+       !FrameTexture(f.color,plan_.output,DXGI_FORMAT_R11G11B10_FLOAT)||!FrameTexture(f.taaOutput,plan_.output,DXGI_FORMAT_R11G11B10_FLOAT))return false;
+    referenced_=true;
+    // Preserve this frame's raw ROI for the existing T -> B copy. If the later
+    // SR pass fails, native postprocessing gets current color, never stale TAA.
+    Transition(f.list,f.color,f.colorState,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Transition(f.list,f.taaOutput,f.outputState,D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=f.color;dst.pResource=f.taaOutput;
+    src.Type=dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    const D3D12_BOX roi{0,0,0,f.render.width,f.render.height,1};f.list->CopyTextureRegion(&dst,0,0,0,&src,&roi);
+    Transition(f.list,f.taaOutput,D3D12_RESOURCE_STATE_COPY_DEST,f.outputState);
+    Transition(f.list,f.color,D3D12_RESOURCE_STATE_COPY_SOURCE,f.colorState);
+    return true;
+}
 NVSDK_NGX_Result QualityGpu::Evaluate(const QualityFrame& f) {
     if(!params_||!f.list||!f.associated||!Matches(f.packedMotion)||((f.depthIsRaster||f.nativeInputs)&&depthState_!=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)||
        (f.nativeInputs&&motionState_!=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)||

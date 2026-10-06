@@ -2,7 +2,7 @@
 
 为《怪物猎人：世界 / Monster Hunter: World》研究现代 **DLSS Super Resolution（超分辨率）** 接入。
 
-**质量档原型已在游戏内接通 SR，并完成多轮 10 秒运行；最新记录了 953 次成功调用及对应完整输出路径，还取得了局部 GPU 耗时。用户反馈上一轮画面正常，但没有明显帧率提升；尚无常驻版本或档位 UI。** 请不要把编译产物当成即装即用的超分模组。
+**质量档原型已在游戏内接通 SR；最新 10 秒内完成 1032 次成功调用及对应完整输出，其中 1031 帧跳过原生 TAA。用户反馈画面没有明显变化，也没有明显帧率提升；尚无常驻版本或档位 UI。** 请不要把编译产物当成即装即用的超分模组。
 
 目标是在保持游戏输出分辨率不变的情况下，让引擎按所选 DLSS 档位真正减少内部渲染像素，再用颜色、深度、运动矢量和抖动信息重建完整输出。目标包含质量、平衡、性能、超高性能档；最终不叠加单独的 DLAA pass，也不包含帧生成、Neural Rendering 或 Ray Reconstruction。
 
@@ -24,8 +24,9 @@
 | 后处理 GPU 取样 | 直接读取真实顶点缓冲区，324 次全屏三角形 UV 均匹配低分辨率区域到完整输出 | 质量档成功帧另用完整输出 UV，画面待确认 |
 | 实际颜色链 | 已逐帧对应 TAA 输出、局部复制、动态模糊重建、色调映射和最终放大，并取得对应着色器哈希 | 全尺寸 SR 输出需要同步处理复制区域、后处理视口/裁剪和 UV，不能只改最后一次取样 |
 | 深度来源 | 原生 TAA 的 t2 是 1×1 占位；已找到 MHWSS 的独立 R32 深度准备路径，269 次 TAA 与本命令列表记录周期中的深度准备对应 | 尚未用连续帧 SR 验证其像素内容、同步及遮挡解除 |
-| 质量档渲染原型 | DLSS 310.9.1 / Quality=2，1696×954→2560×1440；最新十秒内 953 次 SR 成功及对应完整输出；已恢复并经 fence 释放 | 可等待游戏前台 F8 后触发，带启停提示；原生 TAA 暂作回退，不作为 SR 输入 |
-| GPU 局部耗时 | 质量档下 TAA 至复制入口中位约 0.162 ms，SR 连同输入准备及完整输出复制约 3.186 ms | 未拆分 SR 各部分，未测整帧 GPU 忙碌时间；无帧率收益结论 |
+| 质量档渲染原型 | DLSS 310.9.1 / Quality=2，1696×954→2560×1440；最新十秒内 1032 次 SR 成功及对应完整输出；已恢复并经 fence 释放 | 可等待游戏前台 F8 后触发，带启停提示 |
+| 原生 TAA 旁路 | 首个 SR 成功后跳过 TAA dispatch，最新窗口跳过 1031 帧；以当前原始颜色作失败回退 | 菜单仍需 TAA 以保留数据入口；SR 窗口外恢复原生 TAA；画质提升未证实 |
+| GPU 局部耗时 | 上轮质量档下 TAA 段中位约 0.162 ms；最新原始颜色回退复制约 0.045 ms，SR 总段约 3.026 ms | 未拆分 SR 各部分，未测整帧 GPU 忙碌时间；无帧率收益结论 |
 | 档位和 UI | 已有尺寸查询、范围检查及质量模式参数适配代码 | 档位切换和 UI 尚未接通；超高性能还受引擎 0.5 比例下限限制 |
 
 上述尺寸是研究过程中使用的实例；设计应从运行时输出目标取尺寸，不绑定 2K、4K 或桌面分辨率。详细数据、接口位置和限制见 [研究记录](docs/RESEARCH.md)、[桥接设计](docs/BRIDGE.md) 和 [真实纹理链](docs/TEXTURE-GRAPH.md)。
@@ -89,7 +90,7 @@ python -m venv .venv
 ## 后续工作
 
 1. 继续检查质量档 SR 的抖动/MV 时域表现及遮挡变化。
-2. 拆分 SR 的输入准备、NGX 和复制耗时，去掉多余 TAA 计算，再比较整帧 GPU 时间。
+2. 拆分 SR 的输入准备、NGX 和复制耗时，继续减少额外开销，再比较整帧 GPU 时间。
 3. 验证 GPU 完成后的释放，并扩展到常驻运行、尺寸变化和场景切换恢复。
 4. 验证运动矢量、投影抖动、遮挡变化与连续帧画质，再测量 GPU 帧时间。
 5. 接通质量／平衡／性能档位和 UI；另行解决超高性能所需的引擎比例下限。
@@ -102,4 +103,4 @@ python -m venv .venv
 
 ---
 
-Experimental research for modern DLSS Super Resolution in Monster Hunter: World. The latest bounded in-game Quality run completed 953 successful SR calls and matching output passes in ten seconds, with a foreground F8 trigger, start/end cues and local GPU timings. An earlier run looked normal to the user, with no obvious FPS gain. **Temporal correctness and performance gains remain unverified; this is not a ready-to-use mod.**
+Experimental research for modern DLSS Super Resolution in Monster Hunter: World. The latest ten-second Quality run completed 1032 successful SR calls and matching output passes, bypassing native TAA on 1031 frames after warm-up. It has a foreground F8 trigger, start/end cues and local GPU timings. The user still reported no obvious picture or FPS change. **Temporal correctness and performance gains remain unverified; this is not a ready-to-use mod.**

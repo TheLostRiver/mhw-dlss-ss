@@ -59,7 +59,7 @@ int wmain(int argc, wchar_t** argv) {
          _wcsicmp(observerName.c_str(), L"MhwSrBridge_quality_v4.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwSrBridge_quality_v5.dll") != 0 &&
          _wcsicmp(observerName.c_str(), L"MhwSrBridge_quality_v6.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwSrBridge_quality_v7.dll") != 0 &&
          _wcsicmp(observerName.c_str(), L"MhwSrBridge_quality_v8.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwSrBridge_quality_v9.dll") != 0 &&
-         _wcsicmp(observerName.c_str(), L"MhwSrBridge_quality_v10.dll") != 0)) {
+         _wcsicmp(observerName.c_str(), L"MhwSrBridge_quality_v10.dll") != 0 && _wcsicmp(observerName.c_str(), L"MhwSrBridge_quality_v11.dll") != 0)) {
         std::wcerr << L"Only explicitly named research observer DLLs are accepted.\n"; return 2;
     }
     Handle process(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE |
