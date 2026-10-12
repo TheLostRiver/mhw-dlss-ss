@@ -120,6 +120,13 @@ target_compile_options(MhwSrLauncher PRIVATE /W4 /permissive- /guard:cf /utf-8)
 target_link_options(MhwSrLauncher PRIVATE /guard:cf /DYNAMICBASE /NXCOMPAT)
 target_link_libraries(MhwSrLauncher PRIVATE bcrypt user32)
 
+add_executable(MhwSrPanel WIN32 ../standalone/MhwSrPanel.cpp)
+target_compile_features(MhwSrPanel PRIVATE cxx_std_17)
+target_compile_definitions(MhwSrPanel PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(MhwSrPanel PRIVATE /W4 /permissive- /guard:cf /utf-8)
+target_link_options(MhwSrPanel PRIVATE /guard:cf /DYNAMICBASE /NXCOMPAT)
+target_link_libraries(MhwSrPanel PRIVATE user32 gdi32 comctl32 shell32)
+
 foreach(target MhwSrProbe MhwViewportProbe MhwTextureProbe MhwPassProbe MhwScreenProbe MhwScalePilot MhwQuadPilot MhwSrBridge MhwNativeHost)
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

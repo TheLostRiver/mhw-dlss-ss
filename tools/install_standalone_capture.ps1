@@ -6,17 +6,23 @@ param(
     [Parameter(Mandatory=$true,ParameterSetName='Restore')][string]$RestoreBackup
 )
 $ErrorActionPreference = 'Stop'
-$supportedKinds = @('standalone-input-capture-v1','standalone-projection-capture-v2')
-$allowedFiles = @('MhwSrLauncher.exe','MhwNativeHost.dll','MhwNativeHost.ini','MhwNativeMethods.ini','MhwSr-MinHook-LICENSE.txt')
+$hostFiles = @('MhwSrLauncher.exe','MhwNativeHost.dll','MhwNativeHost.ini','MhwNativeMethods.ini','MhwSr-MinHook-LICENSE.txt')
+$panelFiles = @('MhwSrLauncher.exe','MhwSrPanel.exe','MhwSrPanel.ini')
+$filesByKind = @{
+    'standalone-input-capture-v1'=$hostFiles
+    'standalone-projection-capture-v2'=$hostFiles
+    'standalone-control-panel-v1'=$panelFiles
+}
+$allowedFiles = @($hostFiles + $panelFiles | Select-Object -Unique)
 $allowedDisable = @('d3d12.dll','MHWSS.dll','nativePC\plugins\MhwSrProbe.dll','nativePC\plugins\MhwSrBridge.dll',
     'nativePC\plugins\MhwScreenProbe.dll','nativePC\plugins\MhwScreenProbe_v2.dll','nativePC\plugins\MhwScreenProbe_v3.dll',
     'nativePC\plugins\MhwScreenProbe_v4.dll','nativePC\plugins\MhwScalePilot_v4.dll','nativePC\plugins\MhwQuadPilot.dll','nativePC\plugins\MhwPassProbe.dll')
 function Require-Stopped {
-    foreach ($process in @(Get-Process -Name MonsterHunterWorld -ErrorAction SilentlyContinue)) {
+    foreach ($process in @(Get-Process -Name MonsterHunterWorld,MhwSrPanel -ErrorAction SilentlyContinue)) {
         if ($process.HasExited -eq $true) { continue }
         $modules = @($process.Modules | Where-Object { $null -ne $_ })
         if ($process.Threads.Count -gt 0 -or $process.WorkingSet64 -gt 64MB -or $modules.Count -gt 0) {
-            throw "Exit the game normally before changing files (PID $($process.Id))."
+            throw "Exit $($process.ProcessName) normally before changing files (PID $($process.Id))."
         }
     }
 }
@@ -63,18 +69,21 @@ Require-Stopped
 if ($PSCmdlet.ParameterSetName -eq 'Restore') {
     $backupRoot = (Resolve-Path -LiteralPath $RestoreBackup).Path
     $state = Get-Content -LiteralPath (Join-Path $backupRoot 'install-state.json') -Raw | ConvertFrom-Json
-    if ($supportedKinds -notcontains $state.kind) { throw 'Unknown backup format.' }
+    if (-not $filesByKind.ContainsKey($state.kind)) { throw 'Unknown backup format.' }
     Restore-Install $backupRoot $state
     return
 }
 $gameRoot = (Resolve-Path -LiteralPath $GameDirectory).Path
 $stageRoot = (Resolve-Path -LiteralPath $StageDirectory).Path
 $manifest = Get-Content -LiteralPath (Join-Path $stageRoot 'manifest.json') -Raw | ConvertFrom-Json
-if ($supportedKinds -notcontains $manifest.kind -or $manifest.files.Count -ne $allowedFiles.Count) { throw 'Unexpected stage manifest.' }
+if (-not $filesByKind.ContainsKey($manifest.kind)) { throw 'Unexpected stage manifest.' }
+$requiredFiles = $filesByKind[$manifest.kind]
+if ($manifest.files.Count -ne $requiredFiles.Count) { throw 'Unexpected staged-file count.' }
+if ($manifest.kind -eq 'standalone-control-panel-v1' -and @($manifest.disable).Count -ne 0) { throw 'A panel update cannot disable render components.' }
 Require-Hash (Inside-File $gameRoot 'MonsterHunterWorld.exe') 'c2ebbbd2c49f216d484e31a5219bed419eb1e5e7d206d02cba040a3ab79d90ea'
 $seen = @{}
 foreach ($entry in $manifest.files) {
-    if ($allowedFiles -notcontains $entry.name -or $seen.ContainsKey($entry.name)) { throw 'Unexpected or duplicate staged-file entry.' }
+    if ($requiredFiles -notcontains $entry.name -or $seen.ContainsKey($entry.name)) { throw 'Unexpected or duplicate staged-file entry.' }
     $seen[$entry.name] = $true
     Require-Hash (Inside-File $stageRoot $entry.name) $entry.sha256
 }
@@ -112,5 +121,5 @@ try {
     Restore-Install $backupRoot ([pscustomobject]$state)
     throw $failure
 }
-[pscustomobject]@{Installed=$gameRoot;Backup=$backupRoot;Stage='Native input capture and optional bounded projection pulse; SR is not enabled';
+[pscustomobject]@{Installed=$gameRoot;Backup=$backupRoot;Stage=$manifest.kind;SuperResolutionEnabled=$false;
     SteamLaunchOption='cmd /c start "" MhwSrLauncher.exe & rem %command%';GameStarted=$false} | ConvertTo-Json

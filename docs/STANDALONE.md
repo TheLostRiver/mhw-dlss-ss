@@ -2,10 +2,11 @@
 
 目标是由本项目独立完成启动、D3D12 数据接入、抖动、DLSS SR、完整输出和档位控制。已有的质量档 GPU 执行与引擎内部比例代码会继续使用。
 
-当前新增两个程序：
+当前运行组件：
 
 - `MhwSrLauncher.exe`：启动游戏并尽早加载本项目的原生输入模块。失败时保留游戏进程，不强制退出。
 - `MhwNativeHost.dll`：通过 D3D12 资源创建、计算管线创建、PSO/CBV 绑定、Reset 和 Dispatch 接口，独立发现常量缓冲和 TAA，并读取相机与屏幕参数。v2 增加可选的短时原生投影抖动。
+- `MhwSrPanel.exe`：独立控制面板，默认 End 显示／隐藏，在界面中改键并保存。它显示连接状态，当前不提供可用的 SR 档位，详见 [UI 说明](UI.md)。
 
 **v1 已完成独立输入采集；v2 已编译，尚待游戏内采集。两者都不执行 SR，不改变输出或内部渲染分辨率。** v2 仅在显式触发并通过基线匹配后，短暂修改投影；不能把编译成功当成已完成独立超分。
 
@@ -38,6 +39,7 @@ v2 的 `KeepArmed=1` 会在一次采集后保留启动时识别的对象和钩�
 
 ```powershell
 cmake --build build --config Release --target MhwNativeHost MhwSrLauncher MhwD3D12Methods --parallel 2
+cmake --build build --config Release --target MhwSrPanel --parallel 2
 build/bin/Release/MhwD3D12Methods.exe 0 "<暂存目录>/MhwNativeMethods.ini"
 ```
 
@@ -48,6 +50,8 @@ build/bin/Release/MhwD3D12Methods.exe 0 "<暂存目录>/MhwNativeMethods.ini"
 ## 安装与恢复
 
 保存进度并正常退出游戏后，由 [安装脚本](../tools/install_standalone_capture.ps1) 安装已核对的包；脚本拒绝在游戏运行时更改文件，也不启动游戏。
+
+安装器另支持 `standalone-control-panel-v1` UI 更新包，仅替换面板程序、面板配置和启动器，保留当前原生输入版本及其配置。更换面板时也需先从界面或托盘菜单退出面板。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/install_standalone_capture.ps1 `

@@ -51,6 +51,16 @@ void LoadHost(HANDLE process,DWORD pid,const std::filesystem::path& dll) {
     if(!ModuleBase(pid,dll.filename().wstring(),&path))throw std::runtime_error("Standalone host not found after loading");
     Log("Standalone host loaded. See MhwNativeHost-<PID>.jsonl for readiness; SR is not enabled in this diagnostic build.");
 }
+void StartPanel(const std::filesystem::path& root) {
+    const auto panel=root/L"MhwSrPanel.exe";
+    if(!std::filesystem::is_regular_file(panel)){Log("Optional control panel is not installed.");return;}
+    std::wstring command=L"\""+panel.wstring()+L"\" --auto";
+    STARTUPINFOW startup{};startup.cb=sizeof(startup);startup.dwFlags=STARTF_USESHOWWINDOW;startup.wShowWindow=SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    if(CreateProcessW(panel.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_UNICODE_ENVIRONMENT,nullptr,root.c_str(),&startup,&pi)){
+        CloseHandle(pi.hThread);CloseHandle(pi.hProcess);Log("Control panel started; its saved shortcut toggles visibility (End by default).");
+    }else Log("Optional control panel could not start; the game and native host remain running.");
+}
 }
 int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
     try {
@@ -64,7 +74,7 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
         if(!CreateProcessW(game.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_UNICODE_ENVIRONMENT,nullptr,root.c_str(),&startup,&pi))
             throw std::runtime_error("Game process creation failed");
         Handle process{pi.hProcess},thread{pi.hThread};
-        logFile<<"Started game PID "<<pi.dwProcessId<<"\n";logFile.flush();LoadHost(process.value,pi.dwProcessId,host);return 0;
+        logFile<<"Started game PID "<<pi.dwProcessId<<"\n";logFile.flush();LoadHost(process.value,pi.dwProcessId,host);StartPanel(root);return 0;
     }catch(const std::exception& e){Log(e.what());std::wstring message;for(const char c:std::string(e.what()))message.push_back(wchar_t(c));
         MessageBoxW(nullptr,message.c_str(),L"MHW SR standalone launcher",MB_OK|MB_ICONERROR);return 1;}
 }
