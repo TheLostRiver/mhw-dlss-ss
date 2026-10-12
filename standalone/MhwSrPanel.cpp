@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include "NativeHostStatus.h"
 
 #pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='amd64' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -238,6 +239,18 @@ void RefreshConnection() {
     if(!g_gamePid){SetText(g_connection,L"游戏未运行");return;}
     const auto name=L"Local\\MhwNativeHost."+std::to_wstring(g_gamePid)+L".Start";
     Handle ready(OpenEventW(SYNCHRONIZE,FALSE,name.c_str()));
+    const auto status=mhwsr::NativeStatusPath(g_root,g_gamePid);
+    const auto processStart=mhwsr::ProcessStartToken(g_game.value);
+    if(!processStart.empty()&&mhwsr::NativeStatusField(status,L"ProcessStart")==processStart){
+        const auto state=mhwsr::NativeStatusField(status,L"State");
+        if(state==L"Refused"){SetText(g_connection,L"独立入口初始化失败");return;}
+        if(state==L"Disabled"){SetText(g_connection,L"独立入口未启用");return;}
+        if(state==L"Stopped"){SetText(g_connection,L"独立入口已停止");return;}
+        if(state==L"Capturing"){SetText(g_connection,L"正在采集相机输入");return;}
+        if(state==L"WaitingForProjection"){SetText(g_connection,L"正在准备相机输入");return;}
+        if(state==L"Starting"||state==L"WaitingForD3D12"){SetText(g_connection,L"独立入口正在初始化");return;}
+        if(state==L"Ready"&&ready.value){SetText(g_connection,L"独立入口已就绪");return;}
+    }
     if(ready.value)SetText(g_connection,L"独立入口已连接");
     else if(!GetPrivateProfileIntW(L"Standalone",L"Enabled",0,(g_root/L"MhwNativeHost.ini").c_str()))SetText(g_connection,L"独立入口未启用或已停止");
     else SetText(g_connection,L"游戏已启动，等待独立入口");

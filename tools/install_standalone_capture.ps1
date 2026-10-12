@@ -11,6 +11,7 @@ $panelFiles = @('MhwSrLauncher.exe','MhwSrPanel.exe','MhwSrPanel.ini')
 $filesByKind = @{
     'standalone-input-capture-v1'=$hostFiles
     'standalone-projection-capture-v2'=$hostFiles
+    'standalone-projection-capture-v3'= @($hostFiles + @('MhwSrPanel.exe','MhwSrPanel.ini'))
     'standalone-control-panel-v1'=$panelFiles
 }
 $allowedFiles = @($hostFiles + $panelFiles | Select-Object -Unique)

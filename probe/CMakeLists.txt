@@ -109,6 +109,9 @@ target_link_libraries(MhwSrBridge PRIVATE bcrypt minhook d3d12 d3dcompiler)
 enable_language(ASM_MASM)
 add_library(MhwNativeHost SHARED ../standalone/MhwNativeHost.cpp ../standalone/ProjectionGateway.asm)
 target_compile_features(MhwNativeHost PRIVATE cxx_std_17)
+# Pinned MinHook allocator: reserve a nearby slot before the game materializes
+# the verified runtime instruction, without decoding or patching that address.
+target_include_directories(MhwNativeHost PRIVATE "${MHW_SR_MINHOOK_DIR}/src")
 target_compile_definitions(MhwNativeHost PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(MhwNativeHost PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4;/permissive-;/guard:cf;/utf-8>)
 target_link_options(MhwNativeHost PRIVATE /guard:cf /DYNAMICBASE /NXCOMPAT)
