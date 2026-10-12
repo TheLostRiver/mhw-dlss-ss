@@ -21,7 +21,7 @@ inline bool WriteNativeStatus(const std::filesystem::path& path,const std::wstri
     if(path.empty()||token.empty())return false;
     std::wstring values;
     const auto append=[&](const wchar_t* key,const std::wstring& value){values+=key;values+=L'=';values+=value;values.push_back(L'\0');};
-    append(L"Version",L"3");append(L"ProcessStart",token);append(L"State",state);append(L"Reason",reason);
+    append(L"Version",L"4");append(L"ProcessStart",token);append(L"State",state);append(L"Reason",reason);
     append(L"SuperResolutionActive",L"0");values.push_back(L'\0');
     return WritePrivateProfileSectionW(L"Runtime",values.c_str(),path.c_str())!=FALSE;
 }

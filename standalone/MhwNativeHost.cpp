@@ -311,7 +311,7 @@ DWORD WINAPI Worker(void*) {
         g_statusPath=mhwsr::NativeStatusPath(folder,GetCurrentProcessId());g_processStart=mhwsr::ProcessStartToken(GetCurrentProcess());
         g_log.open(folder/(L"MhwNativeHost-"+std::to_wstring(GetCurrentProcessId())+L".jsonl"),std::ios::app);
         if(!g_log)throw std::runtime_error("Native host log could not be opened");
-        Log("{\"event\":\"native_host_starting\",\"version\":3,\"pid\":"+std::to_string(GetCurrentProcessId())+",\"sr_execution\":false}");
+        Log("{\"event\":\"native_host_starting\",\"version\":4,\"pid\":"+std::to_string(GetCurrentProcessId())+",\"sr_execution\":false}");
         if(GetPrivateProfileIntW(L"Standalone",L"Enabled",0,ini.c_str())!=1){
             RuntimeStatus(L"Disabled");Log("{\"event\":\"native_host_disabled\",\"hooks_installed\":false}");return 0;}
         RuntimeStatus(L"Starting");
@@ -353,7 +353,7 @@ DWORD WINAPI Worker(void*) {
         start=CreateEventW(nullptr,FALSE,FALSE,(prefix+L".Start").c_str());cancel=CreateEventW(nullptr,TRUE,FALSE,(prefix+L".Cancel").c_str());
         if(!start||!cancel)throw std::runtime_error("Native control events unavailable");
         RuntimeStatus(L"Ready");g_startupStage="ready";
-        Log(std::string("{\"event\":\"native_host_ready\",\"version\":3,\"independent_host\":true,\"projection_pulse_available\":")+
+        Log(std::string("{\"event\":\"native_host_ready\",\"version\":4,\"independent_host\":true,\"projection_pulse_available\":")+
             (projectionPulse?"true":"false")+",\"rearmable\":"+(keepArmed?"true":"false")+",\"sr_execution\":false,\"modifies_rendering\":false}");
         HANDLE events[]{cancel,start};
         bool keyWasDown=true;uint64_t nextConfigCheck=0;

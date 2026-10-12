@@ -10,9 +10,9 @@ struct ProjectionView {
     uintptr_t context=0;
     unsigned slot=0,type=0;
     int rect[4]{};
-    float matrix[16]{};
-    uint64_t seenAt=0,calls=0,matches=0;
-    bool scratch=false,perspective=false;
+    float matrix[16]{},previousMatrix[16]{};
+    uint64_t seenAt=0,calls=0,matches=0,currentMatches=0,previousMatches=0;
+    bool scratch=false,perspective=false,unmodifiedTransform=false;
 };
 struct ProjectionCapture {
     ProjectionPhase phase=ProjectionPhase::Idle;
@@ -43,6 +43,28 @@ bool SameProjection(const float* a,const float* b) {
     for(unsigned i=0;i<16;++i)if(!Near(a[i],b[i],0.000001f))return false;
     return true;
 }
+void ToNativeShaderProjection(const float* source,float* destination) {
+    // Verified camera submission: fProj = source * screenTransform * clip.
+    // Here screenTransform MUST be identity. The game's clip matrix changes
+    // z to w-z and preserves x/y/w, including the two raster-jitter values.
+    for(unsigned row=0;row<4;++row){
+        for(unsigned column=0;column<4;++column)destination[row*4+column]=source[row*4+column];
+        destination[row*4+2]=source[row*4+3]-source[row*4+2];
+    }
+}
+bool MatchesNativeShaderProjection(const float* raw,const float* shader) {
+    float converted[16]{};ToNativeShaderProjection(raw,converted);return SameProjection(converted,shader);
+}
+bool NativeCameraTransformIsIdentity(const unsigned char* view,unsigned slot) {
+    // The verified camera submitter loads this exact owner and applies its
+    // interpolation/screen-offset fields before creating the shader constants.
+    const unsigned char* owner=nullptr;
+    const auto image=reinterpret_cast<const unsigned char*>(GetModuleHandleW(nullptr));
+    if(slot>=8||!CopyBytes(&owner,image+0x51c4400,sizeof(owner))||!owner||view!=owner+size_t(slot)*0x1a0)return false;
+    float shift[2]{},interpolation=0;
+    return CopyBytes(shift,owner+0x38,sizeof(shift))&&CopyBytes(&interpolation,owner+0x44,4)&&
+        shift[0]==0&&shift[1]==0&&interpolation==0;
+}
 float Halton(unsigned index,unsigned base) {
     float value=0,factor=1;
     while(index){factor/=float(base);value+=factor*float(index%base);index/=base;}
@@ -53,7 +75,7 @@ void ProjectionOffset(unsigned phase,unsigned width,unsigned height,float* out) 
     out[1]= 2.0f*Halton(phase+1,3)/float(height);
 }
 bool FullView(const ProjectionView& view,unsigned width,unsigned height) {
-    return view.scratch&&view.perspective&&view.rect[0]==0&&view.rect[1]==0&&
+    return view.scratch&&view.perspective&&view.unmodifiedTransform&&view.rect[0]==0&&view.rect[1]==0&&
         view.rect[2]==int(width)&&view.rect[3]==int(height);
 }
 void ProjectionFault(const char* reason) {
@@ -71,8 +93,10 @@ void ObserveProjection(float* result,const unsigned char* view,float* scratch,un
     ProjectionView observed;observed.context=reinterpret_cast<uintptr_t>(view);observed.slot=slot;
     observed.scratch=result==scratch;observed.seenAt=GetTickCount64();unsigned char type=0;
     const bool readable=slot<8&&view&&result&&CopyBytes(&type,view+0x74,1)&&
-        CopyBytes(observed.rect,view+0x78,sizeof(observed.rect))&&CopyBytes(observed.matrix,result,sizeof(observed.matrix));
-    observed.type=type;observed.perspective=readable&&Perspective(observed.matrix);
+        CopyBytes(observed.rect,view+0x78,sizeof(observed.rect))&&CopyBytes(observed.matrix,result,sizeof(observed.matrix))&&
+        CopyBytes(observed.previousMatrix,view+0x1b0,sizeof(observed.previousMatrix));
+    observed.type=type;observed.perspective=readable&&Perspective(observed.matrix)&&Perspective(observed.previousMatrix);
+    observed.unmodifiedTransform=readable&&NativeCameraTransformIsIdentity(view,slot);
     std::lock_guard<std::mutex> lock(g_projectionMutex);
     auto& capture=g_projection;if(!g_projectionCapturing.load()||slot>=8)return;
     // A TAA callback on another thread may have advanced lastInputAt while we
@@ -84,7 +108,9 @@ void ObserveProjection(float* result,const unsigned char* view,float* scratch,un
             return v.calls&&v.context==observed.context&&v.slot==slot;});
         if(saved==capture.views.end())saved=std::find_if(capture.views.begin(),capture.views.end(),[](const ProjectionView& v){return !v.calls;});
         if(saved==capture.views.end()){++capture.viewOverflow;return;}
-        observed.calls=saved->calls+1;observed.matches=saved->matches;*saved=observed;return;
+        observed.calls=saved->calls+1;observed.matches=saved->matches;
+        observed.currentMatches=saved->currentMatches;observed.previousMatches=saved->previousMatches;
+        *saved=observed;return;
     }
     if(capture.phase!=ProjectionPhase::Pulse||!capture.requested)return;
     if(observed.seenAt>=capture.deadline){capture.phase=ProjectionPhase::Recovery;return;}
@@ -120,8 +146,12 @@ void ObserveProjectionInput(bool valid,unsigned width,unsigned height,unsigned i
         }
         capture.width=width;capture.height=height;
         unsigned matches=0,index=0;
-        for(unsigned i=0;i<capture.views.size();++i){const auto& view=capture.views[i];
-            if(now-view.seenAt<250&&FullView(view,width,height)&&SameProjection(view.matrix,current)){++matches;index=i;}}
+        for(unsigned i=0;i<capture.views.size();++i){auto& view=capture.views[i];
+            if(now-view.seenAt>=250||!FullView(view,width,height))continue;
+            const bool currentMatches=MatchesNativeShaderProjection(view.matrix,current);
+            const bool previousMatches=MatchesNativeShaderProjection(view.previousMatrix,previous);
+            if(currentMatches)++view.currentMatches;if(previousMatches)++view.previousMatches;
+            if(currentMatches&&previousMatches){++matches;index=i;}}
         if(matches==1)++capture.views[index].matches;else if(matches>1)++capture.ambiguousInputs;
     }else if(capture.phase==ProjectionPhase::Pulse){
         if(width!=capture.width||height!=capture.height){ProjectionFault("taa_dimensions_changed");return;}
@@ -185,8 +215,12 @@ void LogProjectionSummary(uint64_t session) {
         std::ostringstream item;item<<std::setprecision(9)<<"{\"event\":\"native_projection_view\",\"session\":"<<session
             <<",\"slot\":"<<view.slot<<",\"type\":"<<view.type<<",\"rect\":["<<view.rect[0]<<','<<view.rect[1]<<','<<view.rect[2]<<','<<view.rect[3]
             <<"],\"scratch_matches\":"<<(view.scratch?"true":"false")<<",\"perspective\":"<<(view.perspective?"true":"false")
-            <<",\"calls\":"<<view.calls<<",\"taa_projection_matches\":"<<view.matches<<",\"matrix\":[";
+            <<",\"identity_screen_transform\":"<<(view.unmodifiedTransform?"true":"false")
+            <<",\"calls\":"<<view.calls<<",\"taa_projection_matches\":"<<view.matches
+            <<",\"current_matrix_matches\":"<<view.currentMatches<<",\"previous_matrix_matches\":"<<view.previousMatches<<",\"matrix\":[";
         for(unsigned i=0;i<16;++i){if(i)item<<',';if(std::isfinite(view.matrix[i]))item<<view.matrix[i];else item<<"null";}
+        float converted[16]{};ToNativeShaderProjection(view.matrix,converted);item<<"],\"shader_space_matrix\":[";
+        for(unsigned i=0;i<16;++i){if(i)item<<',';if(std::isfinite(converted[i]))item<<converted[i];else item<<"null";}
         item<<"]}";Log(item.str());
     }
 }
